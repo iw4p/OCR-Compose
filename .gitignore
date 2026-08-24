@@ -1,0 +1,10 @@
+node_modules/
+dist/
+outputs/
+.bookforge-cache/
+.bookforge-models/
+.bookforge-studio/
+.venv-paddleocr/
+.DS_Store
+corpus/**/.DS_Store
+

@@ -1,0 +1,29 @@
+{
+  "name": "bookforge",
+  "version": "0.1.0",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p .",
+    "studio": "tsx src/cli.ts studio"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "description": "Make a real EPUB from a PDF",
+  "dependencies": {
+    "fast-xml-parser": "^5.11.0",
+    "jszip": "^3.10.1",
+    "mupdf": "^1.28.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  },
+  "type": "module",
+  "bin": {
+    "bookforge": "dist/cli.js"
+  }
+}
