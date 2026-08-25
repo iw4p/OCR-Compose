@@ -1,0 +1,19 @@
+[project]
+name = "bookforge-ocr-paddle"
+version = "0.1.0"
+description = "Persistent PaddleOCR-VL bridge used by Bookforge's OCR adapter (src/pdf/ocr.ts)."
+requires-python = ">=3.9,<3.14"
+dependencies = [
+    "paddlepaddle==3.2.1",
+    "paddleocr[doc-parser]>=3.6.0",
+]
+
+[project.optional-dependencies]
+# Apple Silicon: serves the VLM step through MLX instead of slow CPU inference.
+# See README.md "Apple Silicon" for the matching env vars.
+mlx = ["mlx-vlm>=0.3.11"]
+
+[tool.uv]
+# `ocr-paddle.py` is a standalone script invoked by path, not an importable
+# package — there is nothing here to build or publish.
+package = false

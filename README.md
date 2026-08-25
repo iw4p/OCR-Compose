@@ -137,23 +137,24 @@ The CLI has three commands (via `npx tsx src/cli.ts …` or `npm run build` then
 | `bookforge studio [--port 4173]` | launch the local visual OCR and EPUB workbench |
 
 `--ocr` uses [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6).
-Install it in a Python 3.9–3.13 virtual environment (the model card requires
-PaddlePaddle 3.2.1+ and `paddleocr[doc-parser]` 3.6.0+):
+Its dependencies are pinned in [tools/pyproject.toml](tools/pyproject.toml)
+(Python 3.9–3.13, PaddlePaddle 3.2.1, `paddleocr[doc-parser]` 3.6.0+). Install
+it in a dedicated virtual environment:
 
 ```sh
 uv venv --python 3.13 .venv-paddleocr
-uv pip install --python .venv-paddleocr/bin/python paddlepaddle==3.2.1
-uv pip install --python .venv-paddleocr/bin/python "paddleocr[doc-parser]>=3.6.0"
+uv pip install --python .venv-paddleocr/bin/python -r tools/pyproject.toml
 export BOOKFORGE_PADDLEOCR_PYTHON="$PWD/.venv-paddleocr/bin/python"
 ```
 
 On Apple Silicon the official local route uses `cpu`; set
 `BOOKFORGE_PADDLEOCR_DEVICE=cpu`. GPU hosts can select a Paddle device such as
 `gpu:0`. Direct Apple CPU inference is very slow. Paddle's supported accelerated
-Apple path keeps layout analysis local and serves the VLM with MLX-VLM:
+Apple path keeps layout analysis local and serves the VLM with MLX-VLM (the
+`mlx` extra in `tools/pyproject.toml`):
 
 ```sh
-uv pip install --python .venv-paddleocr/bin/python "mlx-vlm>=0.3.11"
+uv pip install --python .venv-paddleocr/bin/python -r tools/pyproject.toml --extra mlx
 .venv-paddleocr/bin/mlx_vlm.server --port 8111
 export BOOKFORGE_PADDLEOCR_VL_BACKEND=mlx-vlm-server
 export BOOKFORGE_PADDLEOCR_VL_SERVER_URL=http://localhost:8111/
@@ -167,7 +168,6 @@ The first OCR run downloads the official models. The typical PDF→EPUB flow is
 
 ```
 DESIGN.md          the why: evidence, architecture, roadmap
-spike/             Phase 0 throwaway: proved mupdf can feed the PDF front end
 tools/             ocr-paddle.py — persistent PaddleOCR-VL 1.6 bridge
 src/
   contract.ts      schema, validator, block walker
