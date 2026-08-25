@@ -165,9 +165,12 @@ Concretely, a pass may:
 
 1. **Add** a field, or **upgrade** a `null` field to a value.
 2. **Demote** a block by setting a role (`role: "running-header"`,
-   `role: "page-number"`, `role: "artifact"`). Emitters skip demoted roles.
-   Passes never physically remove a block — demotion is reversible by editing
-   one field; deletion is not.
+   `role: "running-footer"`, `role: "page-number"`, `role: "artifact"`).
+   Emitters do not skip demoted blocks — they emit them hidden (`epub3` writes
+   `hidden="hidden"` beside the `role-*` class), so no reader shows them and
+   contract → EPUB → contract stays lossless under §5.2. Passes never
+   physically remove a block — demotion is reversible by editing one field;
+   deletion is not.
 3. **Merge** blocks (lines → paragraph, cross-page halves → one block),
    provided the merged block records provenance: source pages with break
    offsets (§4.4). Merging is the only operation that reduces block count,

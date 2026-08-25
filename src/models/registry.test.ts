@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   listModels,
   managedModelDir,
@@ -59,7 +59,12 @@ function fakeProvider(create?: () => Promise<never>) {
   return { id, log };
 }
 
+// `listModels` asks every registered provider for status, and the endpoint
+// provider's status is a reachability probe. No test opens a socket.
+beforeEach(() => vi.stubGlobal("fetch", async () => ({ ok: true, status: 200 }) as Response));
+
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete process.env.BOOKFORGE_MODEL_IDLE_MS;
 });
 

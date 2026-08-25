@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import JSZip from "jszip";
-import { XMLParser } from "fast-xml-parser";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { writeEpub } from "./write.js";
 import { feldtheorie } from "../fixtures.js";
 
@@ -11,6 +11,26 @@ const assets = new Map<string, Uint8Array>(
 );
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@" });
+
+async function navOf(book: typeof feldtheorie): Promise<string> {
+  const zip = await JSZip.loadAsync(await writeEpub(book, assets));
+  return zip.file("OEBPS/nav.xhtml")!.async("string");
+}
+
+/** A book that is nothing but headings at the given levels. */
+const headingBook = (levels: number[]): typeof feldtheorie => ({
+  ...structuredClone(feldtheorie),
+  content: levels.map((level, i) => ({ type: "heading", level, id: `h-${i}`, text: `Kapitel ${i}` })),
+});
+
+/** The toc as nested `[id, children?]` pairs, so nesting is asserted as data. */
+function tocOutline(nav: string): unknown[] {
+  const navs = [xml.parse(nav).html.body.nav].flat();
+  const toc = navs.find((n) => n["@epub:type"] === "toc");
+  const walk = (list: Record<string, any>): unknown[] =>
+    [list.li].flat().map((li) => [String(li.a["@href"]).split("#")[1], ...(li.ol ? [walk(li.ol)] : [])]);
+  return toc.ol ? walk(toc.ol) : [];
+}
 
 describe("EPUB container structure", () => {
   test("mimetype is the first entry, stored uncompressed", async () => {
@@ -47,6 +67,29 @@ describe("EPUB container structure", () => {
     expect(pkg.spine.itemref["@idref"]).toBe(items.find((i) => i["@href"] === "text/body.xhtml")!["@id"]);
   });
 
+  test("every generated document is well-formed XML", async () => {
+    const book = structuredClone(feldtheorie);
+    book.content.push(
+      { type: "heading", level: 1, id: "part-1", text: "**Erster Teil**" },
+      { type: "text", role: "running-header", text: "FELDTHEORIE", page: 46 },
+      {
+        type: "list",
+        ordered: false,
+        items: [[{ type: "text", text: "Erstens." }], [{ type: "text", text: "*Zweitens.*" }]],
+      },
+      { type: "table", rows: [["Melange", "€4.20"]], caption: "Preise." },
+      { type: "quote", text: "Zitat.", attribution: "N. N." },
+      {
+        type: "text",
+        text: "Er nannte es joie de vivre.",
+        annotations: [{ start: 13, end: 26, matches: "joie de vivre", language: "fr" }],
+      }
+    );
+    const zip = await JSZip.loadAsync(await writeEpub(book, assets));
+    for (const name of ["META-INF/container.xml", "OEBPS/package.opf", "OEBPS/nav.xhtml", "OEBPS/text/body.xhtml"])
+      expect(XMLValidator.validate(await zip.file(name)!.async("string")), name).toBe(true);
+  });
+
   test("nav.xhtml has a toc built from headings, targeting body anchors", async () => {
     const zip = await JSZip.loadAsync(await writeEpub(feldtheorie, assets));
     const nav = await zip.file("OEBPS/nav.xhtml")!.async("string");
@@ -72,6 +115,47 @@ describe("EPUB container structure", () => {
     expect(nav).toMatch(/part-1[\s\S]*<ol>[\s\S]*kap-1[\s\S]*kap-2[\s\S]*<\/ol>/);
     // headings deeper than level 3 stay out of the menu
     expect(nav).not.toContain("#junk");
+  });
+
+  // One misnested list makes the whole document unparseable, so the TOC is
+  // checked with a real XML validator rather than by string matching.
+  test("nav.xhtml is well-formed XML whatever levels the headings use", async () => {
+    const shapes = [
+      [2], // the DESIGN.md §4 fixture: shallowest heading is h2
+      [2, 2, 3, 2], // h2-first with a subsection
+      [1, 3, 3, 1], // a legitimate h1 → h3 jump
+      [1, 2, 2, 1, 2], // an ordinary h1/h2 book
+      [1, 2, 3, 1], // climbing back out two levels at once
+      [3, 1, 3], // deepest heading first
+    ];
+    for (const levels of shapes) {
+      const nav = await navOf(headingBook(levels));
+      expect(XMLValidator.validate(nav), `levels ${JSON.stringify(levels)}`).toBe(true);
+    }
+    expect(XMLValidator.validate(await navOf(feldtheorie))).toBe(true);
+  });
+
+  test("heading levels nest relatively: h2-first starts at the top, h1 → h3 descends one step", async () => {
+    // the fixture's lone h2 is the top level, not a third-level orphan
+    expect(tocOutline(await navOf(headingBook([2])))).toEqual([["h-0"]]);
+    // h3s under an h1 with no h2 between them are that h1's children
+    expect(tocOutline(await navOf(headingBook([1, 3, 3, 1])))).toEqual([
+      ["h-0", [["h-1"], ["h-2"]]],
+      ["h-3"],
+    ]);
+    expect(tocOutline(await navOf(headingBook([1, 2, 2, 1, 2])))).toEqual([
+      ["h-0", [["h-1"], ["h-2"]]],
+      ["h-3", [["h-4"]]],
+    ]);
+    // a deeper heading before a shallower one does not swallow it
+    expect(tocOutline(await navOf(headingBook([3, 1, 3])))).toEqual([["h-0"], ["h-1", [["h-2"]]]]);
+  });
+
+  test("a book with no navigable heading still gets a toc pointing at the spine", async () => {
+    const nav = await navOf(headingBook([]));
+    expect(XMLValidator.validate(nav)).toBe(true);
+    // an EPUB3 toc nav must hold a non-empty <ol>, so the book itself is the entry
+    expect(nav).toContain('<li><a href="text/body.xhtml">Feldtheorie</a></li>');
   });
 
   test("the EPUB ships a stylesheet and block roles become classes", async () => {
@@ -228,6 +312,34 @@ describe("block rendering", () => {
     const nav = await zip.file("OEBPS/nav.xhtml")!.async("string");
     expect(nav).toContain('epub:type="page-list"');
     for (const p of [41, 42, 43, 44]) expect(nav).toContain(`href="text/body.xhtml#page-${p}">${p}<`);
+  });
+
+  // I3 — demoted blocks are emitted, not skipped; `hidden` is what keeps the
+  // running head off the page while the block survives the round-trip.
+  test("demoted roles render hidden and never as visible body text", async () => {
+    const book = structuredClone(feldtheorie);
+    book.content.push(
+      { type: "text", role: "running-header", text: "FELDTHEORIE", page: 46 },
+      { type: "text", role: "page-number", text: "46", page: 46 },
+      { type: "heading", level: 2, role: "artifact", id: "scan-noise", text: "Bibliothek Wien", page: 46 },
+      { type: "text", role: "separator", text: "\\* \\* \\*", page: 46 }
+    );
+    const zip = await JSZip.loadAsync(await writeEpub(book, assets));
+    const body = await zip.file("OEBPS/text/body.xhtml")!.async("string");
+    expect(body).toContain('<p class="role-running-header" hidden="hidden">FELDTHEORIE</p>');
+    expect(body).toContain('<p class="role-page-number" hidden="hidden">46</p>');
+    expect(body).toContain('<h2 id="scan-noise" class="role-artifact" hidden="hidden">');
+    // strip every hidden element: no demoted text is left anywhere visible
+    const visible = body.replace(/<(\w+)[^>]*\shidden="hidden"[^>]*>[\s\S]*?<\/\1>/g, "");
+    expect(visible).not.toContain("FELDTHEORIE");
+    expect(visible).not.toContain("Bibliothek Wien");
+    // a role that is visible semantics keeps rendering
+    expect(visible).toContain('<p class="role-separator">* * *</p>');
+    // still well-formed XML, and hidden stated in CSS too (incomplete UA sheets)
+    expect(XMLValidator.validate(body)).toBe(true);
+    expect(await zip.file("OEBPS/style.css")!.async("string")).toContain("[hidden] { display: none; }");
+    // a demoted heading is furniture, not navigation
+    expect(await zip.file("OEBPS/nav.xhtml")!.async("string")).not.toContain("#scan-noise");
   });
 
   test("annotations render language and small-caps spans", async () => {

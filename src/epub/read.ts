@@ -250,7 +250,9 @@ function parseBlock(node: XNode, tracker: PageTracker, ctx: ReadCtx): Block | nu
   const id = rawId !== undefined ? ctx.ids.get(rawId) ?? sanitizeId(rawId) : undefined;
   const language = attr(node, "xml:lang") ?? attr(node, "lang");
   // only our own prefixed classes map back to roles — foreign classes
-  // ("pginternal", "chapter") are presentation, not semantics
+  // ("pginternal", "chapter") are presentation, not semantics. `hidden` is
+  // presentation too: the writer derives it from the role (I3), so reading it
+  // back would duplicate what the class already carries.
   const role = classes(node)
     .find((c) => c.startsWith("role-"))
     ?.slice(5);

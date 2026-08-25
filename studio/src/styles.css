@@ -374,6 +374,17 @@ code {
   border-color: var(--accent);
   vertical-align: middle;
 }
+.chip-local {
+  margin-left: 6px;
+  color: var(--native);
+  vertical-align: middle;
+}
+.chip-remote {
+  margin-left: 6px;
+  color: var(--error);
+  border-color: var(--error);
+  vertical-align: middle;
+}
 .chip-heading {
   background: #dce8f5;
 }

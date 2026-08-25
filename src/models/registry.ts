@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { paddleEngine, type OcrEngine } from "../pdf/ocr.js";
+import { vlmProvider } from "./vlm.js";
 
 export type ModelCapability = "layout" | "multilingual" | "tables" | "formulas";
 
@@ -14,6 +15,9 @@ export type ModelStatus = {
   source: ModelSource | null;
   /** Approximate bytes under `.bookforge-models/<id>/`; 0 for external runtimes. */
   diskBytes: number;
+  /** Set by a provider that calls out instead of installing: where pages go,
+   *  and whether that is still this machine. The Studio warns when it is not. */
+  endpoint?: { url: string; local: boolean };
 };
 
 export type ModelInfo = ModelStatus & {
@@ -22,7 +26,7 @@ export type ModelInfo = ModelStatus & {
   version: string;
   description: string;
   capabilities: ModelCapability[];
-  runtime: "python";
+  runtime: "python" | "http";
   installLabel: string;
   firstRunNote: string;
   /** True while a warm engine is held in memory for this model. */
@@ -160,6 +164,8 @@ const provider = (id: string) => {
 export function registerProvider(item: ModelProvider): void {
   providers.push(item);
 }
+
+registerProvider(vlmProvider);
 
 // Keep-alive, like `ollama`: a model stays warm between requests and unloads
 // itself once idle, so a comparison and the conversion that follows it pay the

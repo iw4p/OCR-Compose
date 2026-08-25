@@ -119,6 +119,18 @@ export type Block = BlockCommon &
     | { type: "list"; ordered: boolean; items: Block[][] }
   );
 
+/**
+ * Page furniture a pass demoted rather than deleted (I3). `role` is otherwise
+ * open vocabulary, but this subset is deliberately closed: every other role is
+ * visible semantics (`separator`, `verse`, `caption`, `table-source`,
+ * `footnote-source`) and must keep rendering, while these four are what
+ * emitters hide. Front ends and back ends both spell the names from here.
+ */
+export const DEMOTED_ROLES = ["running-header", "running-footer", "page-number", "artifact"] as const;
+export type DemotedRole = (typeof DEMOTED_ROLES)[number];
+
+export const isDemoted = (block: Block) => DEMOTED_ROLES.some((role) => role === block.role);
+
 export const BlockSchema: z.ZodType<Block> = z.discriminatedUnion("type", [
   HeadingBlock,
   TextBlock,

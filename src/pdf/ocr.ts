@@ -8,7 +8,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Block } from "../contract.js";
+import type { Block, DemotedRole } from "../contract.js";
 
 /** One Paddle layout block, normalized from a top-left origin. */
 export type OcrBlock = {
@@ -87,10 +87,19 @@ const htmlTable = (text: string): string[][] | null => {
 const tableRows = (text: string): string[][] | null => htmlTable(text) ?? markdownTable(text);
 
 const FURNITURE = /header|footer|page[_ -]?number|^number$/;
+const PAGE_NUMBER = /page[_ -]?number|^number$/;
 // PaddleOCR-VL's `vision_footnote` is figure-associated text — an illustration
 // caption, not a page footnote — and `*_title` labels caption their region.
 const CAPTION = /caption|vision[_ -]?footnote|(?:figure|chart|image|table)[_ -]?title/;
 const VISION = /image|figure|chart|photo|seal|stamp/;
+
+/**
+ * The demoted role furniture keeps (I3). `DemotedRole` is the contract's own
+ * vocabulary (`DEMOTED_ROLES`), so a name the emitters do not hide is a type
+ * error here rather than a page of running heads in the finished book.
+ */
+const furnitureRole = (label: string): DemotedRole =>
+  PAGE_NUMBER.test(label) ? "page-number" : /footer/.test(label) ? "running-footer" : "running-header";
 
 const finite = (block: OcrBlock) => Number.isFinite(block.x + block.y + block.w + block.h);
 
@@ -142,9 +151,14 @@ export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[]
   for (const block of blocks) {
     if (!finite(block)) continue;
     const label = block.label.toLowerCase();
-    // I3 wants these demoted, not deleted, but `epub3` renders every block it
-    // is given — demoting today would print the running head on every page.
-    if (FURNITURE.test(label)) continue;
+    // I3: furniture is demoted, not deleted. `epub3` emits demoted blocks
+    // hidden, so the running head stays off the page and one field edit brings
+    // it back. A furniture region with no text has nothing to preserve.
+    if (FURNITURE.test(label)) {
+      const text = prose(block.text);
+      if (text) emit({ type: "text", role: furnitureRole(label), text, page }, block);
+      continue;
+    }
     if (figures.has(block)) {
       emit({ type: "image", file: ocrImageFile(page, block), page }, block);
       continue;
@@ -319,6 +333,41 @@ class PaddleSession {
   }
 }
 
+/**
+ * The `pagecache` of DESIGN tool 16 (P6): one JSON file per recognized page,
+ * named by everything that produced it, so a long run resumes and a page
+ * compared in the Studio is not recognized — or paid for — twice.
+ *
+ * `identity` must name the provider *and* the output contract of the adapter
+ * around it (model, version, endpoint), because an entry one provider wrote
+ * never suits another. `dir` is per provider, so one provider's results can be
+ * deleted without touching another's; `null` disables the cache. A cache that
+ * cannot be read, parsed or written is a miss, never a failed conversion.
+ */
+export function ocrCache(dir: string | null, identity: string) {
+  return async (
+    png: Uint8Array,
+    languages: string[],
+    // the key is also a usable temporary filename for the page image
+    recognize: (key: string) => Promise<OcrBlock[]>
+  ): Promise<OcrBlock[]> => {
+    const key = createHash("sha256")
+      .update(identity + "\0")
+      .update(png)
+      .update("\0" + languages.join(","))
+      .digest("hex");
+    if (!dir) return await recognize(key);
+    const path = join(dir, `${key}.json`);
+    const hit: unknown = await readFile(path, "utf8").then(JSON.parse).catch(() => null);
+    if (Array.isArray(hit)) return hit as OcrBlock[];
+    const blocks = await recognize(key);
+    await mkdir(dir, { recursive: true })
+      .then(() => writeFile(path, JSON.stringify(blocks)))
+      .catch(() => {});
+    return blocks;
+  };
+}
+
 export type PaddleEngineOptions = {
   /** Python 3.9–3.13 environment containing paddlepaddle and paddleocr. */
   pythonPath?: string;
@@ -347,37 +396,24 @@ export function paddleEngine(opts: PaddleEngineOptions = {}): OcrEngine {
     ...(vlServerUrl && { vlServerUrl }),
     ...(vlModelName && { vlModelName }),
   });
+  // the suffix is this helper's output contract, not the model: results cached
+  // before figure regions were kept have no illustrations in them
+  const cache = ocrCache(cacheDir, "PaddleOCR-VL-1.6+figures");
   let workDir: string | null = null;
 
   return {
     name: "PaddleOCR-VL 1.6",
-    async recognize(png, languages) {
-      // the suffix is the helper's output contract, not the model: results
-      // cached before figure regions were kept have no illustrations in them
-      const key = createHash("sha256")
-        .update("PaddleOCR-VL-1.6+figures\0")
-        .update(png)
-        .update("\0" + languages.join(","))
-        .digest("hex");
-      const cachePath = cacheDir ? join(cacheDir, `${key}.json`) : null;
-      if (cachePath) {
-        const hit = await readFile(cachePath, "utf8").catch(() => null);
-        if (hit !== null) return JSON.parse(hit) as OcrBlock[];
-      }
-
-      workDir ??= await mkdtemp(join(tmpdir(), "bookforge-paddleocr-"));
-      const imagePath = join(workDir, `${key}.png`);
-      await writeFile(imagePath, png);
-      try {
-        const blocks = await session.recognize(imagePath);
-        if (cachePath) {
-          await mkdir(cacheDir!, { recursive: true });
-          await writeFile(cachePath, JSON.stringify(blocks));
+    recognize(png, languages) {
+      return cache(png, languages, async (key) => {
+        workDir ??= await mkdtemp(join(tmpdir(), "bookforge-paddleocr-"));
+        const imagePath = join(workDir, `${key}.png`);
+        await writeFile(imagePath, png);
+        try {
+          return await session.recognize(imagePath);
+        } finally {
+          await rm(imagePath, { force: true });
         }
-        return blocks;
-      } finally {
-        await rm(imagePath, { force: true });
-      }
+      });
     },
     async close() {
       await session.close();

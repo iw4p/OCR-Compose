@@ -2,7 +2,7 @@
 // v1; nav doc built from heading blocks; assets carried verbatim.
 import JSZip from "jszip";
 import type { Block, Book } from "../contract.js";
-import { walkBlocks } from "../contract.js";
+import { isDemoted, walkBlocks } from "../contract.js";
 import { parseInline, renderInline, type InlineNode } from "../inline.js";
 
 const escapeXml = (s: string) =>
@@ -195,7 +195,11 @@ function blockAttrs(block: Block): string {
   // roles ride in a prefixed class so foreign classes can't masquerade as
   // roles on the way back in (read.ts maps only `role-*` classes)
   const role = block.role ? ` class="role-${escapeXml(block.role)}"` : "";
-  return id + role + lang;
+  // I3 — a demoted block is emitted, never dropped: `hidden` keeps the running
+  // head off the page while the block (and its role) survives the round-trip.
+  // XHTML needs a value, so the attribute is written out in full.
+  const hidden = isDemoted(block) ? ` hidden="hidden"` : "";
+  return id + role + hidden + lang;
 }
 
 // Fallback figures mark their origin block type on the img class so
@@ -293,8 +297,11 @@ function renderFootnotes(book: Book, ctx: RenderCtx): string {
 
 // Reading-oriented defaults: book paragraphs (no gaps, first-line indents),
 // centered headings and separators, tight verse. Deliberately minimal — the
-// reader's own settings keep control of face, size, and justification.
+// reader's own settings keep control of face, size, and justification. The
+// `[hidden]` rule restates the HTML default for demoted blocks, since not
+// every reading system ships a complete UA stylesheet.
 const STYLESHEET = `body { line-height: 1.5; }
+[hidden] { display: none; }
 h1, h2, h3, h4, h5, h6 { text-align: center; margin: 1.5em 0 0.8em; line-height: 1.25; }
 p { margin: 0; text-indent: 1.2em; }
 h1 + p, h2 + p, h3 + p, h4 + p, h5 + p, h6 + p, figure + p, hr + p { text-indent: 0; }
@@ -349,39 +356,53 @@ function plainText(dialect: string): string {
   }
 }
 
+/** One TOC entry; `children` is the list that nests inside its `<li>`. */
+type NavEntry = { href: string; label: string; children: NavEntry[] };
+
+/**
+ * Headings → a nesting tree. Levels are read as relative, not absolute: the
+ * shallowest heading in a book is often not h1 and a book may legitimately
+ * jump h1 → h3, so a stack of the currently open levels decides parentage. It
+ * gives every entry a parent one step above it, which is what makes the list
+ * renderable at all — an `<ol>` may contain only `<li>`, so a nested list has
+ * to sit inside the `<li>` it belongs to.
+ */
+function navTree(headings: Extract<Block, { type: "heading" }>[]): NavEntry[] {
+  const roots: NavEntry[] = [];
+  const open: { level: number; entry: NavEntry }[] = [];
+  for (const h of headings) {
+    while (open.length > 0 && open.at(-1)!.level >= h.level) open.pop();
+    const entry: NavEntry = { href: `text/body.xhtml#${h.id!}`, label: plainText(h.text), children: [] };
+    (open.at(-1)?.entry.children ?? roots).push(entry);
+    open.push({ level: h.level, entry });
+  }
+  return roots;
+}
+
+function navList(entries: NavEntry[], pad: string): string[] {
+  const lines = [`${pad}<ol>`];
+  for (const entry of entries) {
+    const link = `<a href="${escapeXml(entry.href)}">${escapeXml(entry.label)}</a>`;
+    if (entry.children.length === 0) lines.push(`${pad}  <li>${link}</li>`);
+    else lines.push(`${pad}  <li>${link}`, ...navList(entry.children, `${pad}    `), `${pad}  </li>`);
+  }
+  lines.push(`${pad}</ol>`);
+  return lines;
+}
+
 function navDoc(book: Book, pages: number[]): string {
   // nested TOC from headings with ids; deep levels (4+) are structure, not
   // navigation, and stay out of the menu
   const headings = book.content.filter(
-    (b): b is Extract<Block, { type: "heading" }> => b.type === "heading" && !!b.id && b.level <= 3
+    (b): b is Extract<Block, { type: "heading" }> =>
+      b.type === "heading" && !!b.id && b.level <= 3 && !isDemoted(b)
   );
-  const lines: string[] = [];
-  let depth = 0;
-  const indent = (n: number) => "  ".repeat(n + 2);
-  for (let i = 0; i < headings.length; i++) {
-    const h = headings[i]!;
-    const level = Math.max(1, h.level);
-    while (depth < level) {
-      lines.push(`${indent(depth)}<ol>`);
-      depth++;
-    }
-    while (depth > level) {
-      depth--;
-      lines.push(`${indent(depth + 1)}</li>`);
-      lines.push(`${indent(depth)}</ol>`);
-    }
-    const next = headings[i + 1];
-    const entry = `${indent(depth)}<li><a href="text/body.xhtml#${escapeXml(h.id!)}">${escapeXml(plainText(h.text))}</a>`;
-    if (next && next.level > level) lines.push(entry);
-    else lines.push(entry + "</li>");
-  }
-  while (depth > 0) {
-    depth--;
-    if (depth > 0) lines.push(`${indent(depth + 1)}</li>`);
-    lines.push(`${indent(depth)}</ol>`);
-  }
+  // a toc nav must hold a non-empty `<ol>`, so a book with no navigable
+  // heading (a short scan, a pamphlet) is given the spine document itself
+  const entries = navTree(headings);
+  if (entries.length === 0) entries.push({ href: "text/body.xhtml", label: book.title, children: [] });
   let body = `  <nav epub:type="toc">
-${lines.join("\n")}
+${navList(entries, "    ").join("\n")}
   </nav>`;
   if (pages.length > 0) {
     const pageEntries = pages

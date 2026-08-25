@@ -79,6 +79,28 @@ describe("readEpub", () => {
     expect(back.content.at(-1)).toEqual(book.content.at(-1));
   });
 
+  // The reason demoted blocks are emitted hidden rather than skipped: an
+  // emitter that omitted them would make contract → EPUB → contract lossy,
+  // and I3's promise ("reversible by editing one field") with it.
+  test("demoted blocks survive the round-trip identically", async () => {
+    const book = structuredClone(feldtheorie);
+    book.content.push(
+      { type: "text", role: "running-header", text: "FELDTHEORIE", page: 46 },
+      { type: "text", role: "running-footer", text: "Institut für Theoretische Physik", page: 46 },
+      { type: "text", role: "page-number", text: "46", page: 46 },
+      { type: "heading", level: 2, role: "artifact", id: "scan-noise", text: "Bibliothek Wien", page: 46 },
+      { type: "text", role: "artifact", text: "*Randnotiz*, unlesbar", language: "de", page: 47 }
+    );
+    const { book: back } = await roundtrip(book);
+    expect(validateBook(back)).toEqual([]);
+    expect(back).toEqual(book);
+    // and undemoting is the one field edit I3 promises
+    const demoted = back.content.at(-1)!;
+    delete demoted.role;
+    const { book: visible } = await roundtrip(back);
+    expect(visible.content.at(-1)).toEqual({ type: "text", text: "*Randnotiz*, unlesbar", language: "de", page: 47 });
+  });
+
   test("tables with rows, lists, and annotations round-trip exactly", async () => {
     const book = structuredClone(feldtheorie);
     book.content.push(

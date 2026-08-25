@@ -9,6 +9,14 @@ const onDisk = (bytes: number) => {
   return `${value.toFixed(value < 10 && power > 0 ? 1 : 0)} ${units[power]}`;
 };
 
+const host = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
 export function ModelCatalog({
   models,
   selected,
@@ -39,6 +47,11 @@ export function ModelCatalog({
                 <div className="model-card-title">
                   {model.name} <span className="muted">{model.version}</span>
                   {model.loaded && <span className="chip chip-loaded">loaded</span>}
+                  {model.endpoint && (
+                    <span className={`chip ${model.endpoint.local ? "chip-local" : "chip-remote"}`}>
+                      {model.endpoint.local ? "local endpoint" : "remote endpoint"}
+                    </span>
+                  )}
                 </div>
                 <p className="model-card-desc">{model.description}</p>
                 <div className="model-card-caps">
@@ -54,7 +67,11 @@ export function ModelCatalog({
             {model.installed ? (
               <div className="model-card-status">
                 <span className="muted small">
-                  {model.source === "managed" ? `${size ?? "0 B"} on disk` : "runtime provided by your environment"}
+                  {model.endpoint
+                    ? model.endpoint.url
+                    : model.source === "managed"
+                      ? `${size ?? "0 B"} on disk`
+                      : "runtime provided by your environment"}
                 </span>
                 <span className="model-card-actions">
                   <button type="button" className="btn-ghost btn-small" disabled={busy || !model.loaded} onClick={() => onAction(model.id, "unload")}>
@@ -69,11 +86,19 @@ export function ModelCatalog({
               </div>
             ) : (
               <div className="model-card-status">
-                <span className="muted small">not installed</span>
+                <span className="muted small">{model.endpoint ? `nothing answered at ${model.endpoint.url}` : "not installed"}</span>
                 <button type="button" className="btn-secondary btn-small" disabled={busy} onClick={() => onAction(model.id, "install")}>
-                  {busy ? "installing..." : model.installLabel}
+                  {busy ? (model.endpoint ? "checking..." : "installing...") : model.installLabel}
                 </button>
               </div>
+            )}
+
+            {/* An endpoint outside this machine breaks the local-only promise, so it is never quiet. */}
+            {model.endpoint && !model.endpoint.local && (
+              <p className="status-error small">
+                Not local: every selected page is uploaded to <strong>{host(model.endpoint.url)}</strong> as an image. Point{" "}
+                <code>BOOKFORGE_VLM_URL</code> at a local server to keep the book on this machine.
+              </p>
             )}
 
             {confirmRemove === model.id ? (

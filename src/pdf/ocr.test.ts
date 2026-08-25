@@ -1,5 +1,9 @@
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { ocrBlocksToBookBlocks, ocrFigures, ocrImageFile, type OcrBlock } from "./ocr.js";
+import { ocrBlocksToBookBlocks, ocrCache, ocrFigures, ocrImageFile, paddleEngine, type OcrBlock } from "./ocr.js";
+import { DEMOTED_ROLES } from "../contract.js";
 
 describe("ocrBlocksToBookBlocks", () => {
   test("preserves one semantic paragraph per Paddle block", () => {
@@ -35,16 +39,30 @@ describe("ocrBlocksToBookBlocks", () => {
     ]);
   });
 
-  test("maps Paddle furniture labels and preserves missed all-caps heading evidence", () => {
+  test("demotes Paddle furniture labels and preserves missed all-caps heading evidence", () => {
     const output = ocrBlocksToBookBlocks(
       [
         { text: "10", label: "number", x: 0.05, y: 0.02, w: 0.05, h: 0.02 },
         { text: "ALICE IN WONDERLAND", label: "header", x: 0.3, y: 0.02, w: 0.4, h: 0.02 },
+        { text: "Free eBooks at Planet eBook", label: "footer", x: 0.3, y: 0.95, w: 0.4, h: 0.02 },
         { text: "DOWN THE RABBIT-HOLE", label: "text", x: 0.3, y: 0.2, w: 0.4, h: 0.03 },
       ],
       16
     );
-    expect(output).toEqual([{ type: "heading", level: 2, text: "DOWN THE RABBIT-HOLE", page: 16 }]);
+    // I3 — demoted, not deleted; every role here is one the emitter hides
+    expect(output).toEqual([
+      { type: "text", role: "page-number", text: "10", page: 16 },
+      { type: "text", role: "running-header", text: "ALICE IN WONDERLAND", page: 16 },
+      { type: "text", role: "running-footer", text: "Free eBooks at Planet eBook", page: 16 },
+      { type: "heading", level: 2, text: "DOWN THE RABBIT-HOLE", page: 16 },
+    ]);
+    for (const block of output.slice(0, 3)) expect(DEMOTED_ROLES).toContain(block.role!);
+  });
+
+  test("a furniture region with no text is dropped, having nothing to preserve", () => {
+    expect(
+      ocrBlocksToBookBlocks([{ text: "  ", label: "header_image", x: 0.1, y: 0.02, w: 0.8, h: 0.05 }], 4)
+    ).toEqual([]);
   });
 
   test("keeps adjacent OCR paragraphs separate", () => {
@@ -236,5 +254,69 @@ describe("tables", () => {
       text: "Table 2.2 — coupling constants.",
       page: 2,
     });
+  });
+});
+
+describe("page cache", () => {
+  const page = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const cached: OcrBlock[] = [{ text: "from disk", label: "text", x: 0.1, y: 0.1, w: 0.8, h: 0.1 }];
+  const dir = () => mkdtemp(join(tmpdir(), "bookforge-ocr-cache-"));
+
+  test("Paddle still addresses the entries already written under .bookforge-cache", async () => {
+    // Pinned against the real 1.6 entries on disk: this hex is what the shipped
+    // key derivation produces for this page. If it moves, every page recognized
+    // so far is silently orphaned and paid for again.
+    const key = "a08c5bb528d9a4e0caaecb5d5268d51f222e605ed577237ad5f678d99e949929";
+    const cacheDir = await dir();
+    await writeFile(join(cacheDir, `${key}.json`), JSON.stringify(cached));
+    // a hit must not reach for Python at all: neither of these paths exists
+    const engine = paddleEngine({ cacheDir, pythonPath: "/nonexistent/python", helperPath: "/nonexistent.py" });
+    expect(await engine.recognize(page, ["en"])).toEqual(cached);
+    await rm(cacheDir, { recursive: true, force: true });
+  });
+
+  test("the key covers the provider identity, the page and the languages", async () => {
+    const keys = new Set<string>();
+    const seen = async (identity: string, png: Uint8Array, languages: string[]) => {
+      await ocrCache(null, identity)(png, languages, async (key) => {
+        keys.add(key);
+        return [];
+      });
+    };
+    await seen("PaddleOCR-VL-1.6+figures", page, ["en"]);
+    await seen("PaddleOCR-VL-1.6+figures", page, ["en"]);
+    expect(keys.size).toBe(1);
+    await seen("PaddleOCR-VL-1.6", page, ["en"]);
+    await seen("PaddleOCR-VL-1.6+figures", new Uint8Array([...page, 4]), ["en"]);
+    await seen("PaddleOCR-VL-1.6+figures", page, ["de"]);
+    expect(keys.size).toBe(4);
+  });
+
+  test("an empty page is a hit, and a corrupt entry is a miss", async () => {
+    const cacheDir = await dir();
+    const cache = ocrCache(cacheDir, "test-provider");
+    let runs = 0;
+    const recognize = async () => {
+      runs++;
+      return [] as OcrBlock[];
+    };
+    expect(await cache(page, [], recognize)).toEqual([]);
+    // a page with nothing on it was recognized once and must not be run again
+    expect(await cache(page, [], recognize)).toEqual([]);
+    expect(runs).toBe(1);
+
+    const [file] = await readdir(cacheDir);
+    await writeFile(join(cacheDir, file!), "not json at all");
+    expect(await cache(page, [], recognize)).toEqual([]);
+    expect(runs).toBe(2);
+    await rm(cacheDir, { recursive: true, force: true });
+  });
+
+  test("a cache that cannot be written never fails the page", async () => {
+    const cacheDir = await dir();
+    await writeFile(join(cacheDir, "wall"), "");
+    const cache = ocrCache(join(cacheDir, "wall", "pages"), "test-provider");
+    expect(await cache(page, [], async () => cached)).toEqual(cached);
+    await rm(cacheDir, { recursive: true, force: true });
   });
 });
