@@ -7,9 +7,9 @@ import type { AddressInfo } from "node:net";
 import { validateBook, type Book } from "../contract.js";
 import { readEpub } from "../epub/read.js";
 import { writeEpub } from "../epub/write.js";
-import { createModel, installModel, listModels } from "../models/registry.js";
+import { installModel, listModels, removeModel, unloadModel, withModel } from "../models/registry.js";
 import { extractPdf, renderPagePng } from "../pdf/extract.js";
-import { ocrBlocksToBookBlocks } from "../pdf/ocr.js";
+import { ocrBlocksToBookBlocks, type OcrEngine } from "../pdf/ocr.js";
 import { pdfToBook } from "../pdf/pdf.js";
 import { textlayer, type PageReport } from "../pdf/textlayer.js";
 
@@ -26,14 +26,19 @@ type DocumentSession = {
 };
 
 const sessions = new Map<string, DocumentSession>();
-const staticRoot = fileURLToPath(new URL("../../studio/", import.meta.url));
+const staticRoot = fileURLToPath(new URL("../../studio/dist/", import.meta.url));
 const sessionRoot = () => join(process.cwd(), ".bookforge-studio", "sessions");
 
 const contentTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
 
@@ -99,9 +104,12 @@ const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise
     return true;
   }
 
-  const installMatch = /^\/api\/models\/([^/]+)\/install$/.exec(url.pathname);
-  if (req.method === "POST" && installMatch) {
-    const result = await installModel(decodeURIComponent(installMatch[1]!));
+  // install = put on disk, unload = free memory now, remove = delete from disk.
+  const modelMatch = /^\/api\/models\/([^/]+)\/(install|unload|remove)$/.exec(url.pathname);
+  if (req.method === "POST" && modelMatch) {
+    const id = decodeURIComponent(modelMatch[1]!);
+    const action = { install: installModel, unload: unloadModel, remove: removeModel }[modelMatch[2]!]!;
+    const result = await action(id);
     json(res, 200, { ...result, models: await listModels() });
     return true;
   }
@@ -150,6 +158,18 @@ const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise
     return true;
   }
 
+  const assetMatch = /^\/api\/documents\/([^/]+)\/assets\/(.+)$/.exec(url.pathname);
+  if (req.method === "GET" && assetMatch) {
+    const session = safeSession(assetMatch[1]!);
+    const path = decodeURIComponent(assetMatch[2]!);
+    const conversionId = url.searchParams.get("conversionId");
+    const assets = (conversionId && session.conversions.get(conversionId)?.assets) || session.assets;
+    const value = assets?.get(path);
+    if (!value) throw new Error(`asset not found: ${path}`);
+    bytes(res, 200, value, contentTypes[extname(path)] ?? "application/octet-stream");
+    return true;
+  }
+
   const pageMatch = /^\/api\/documents\/([^/]+)\/pages\/(\d+)\.png$/.exec(url.pathname);
   if (req.method === "GET" && pageMatch) {
     const session = safeSession(pageMatch[1]!);
@@ -169,12 +189,12 @@ const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise
     if (!session.reports?.some((report) => report.page === request.page)) throw new Error("sample page is out of range");
     const pagePng = renderPagePng(session.bytes, request.page, 2);
     const results = [];
+    // Sequential on purpose: one model is resident at a time. Engines stay warm
+    // afterwards, so the convert that follows reuses the loaded weights.
     for (const modelId of request.modelIds) {
       const started = performance.now();
-      let engine: Awaited<ReturnType<typeof createModel>> | undefined;
       try {
-        engine = await createModel(modelId);
-        const blocks = await engine.recognize(pagePng, []);
+        const blocks = await withModel(modelId, (engine) => engine.recognize(pagePng, []));
         results.push({
           modelId,
           ok: true,
@@ -189,8 +209,6 @@ const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise
           elapsedMs: Math.round(performance.now() - started),
           error: error instanceof Error ? error.message : String(error),
         });
-      } finally {
-        await engine?.close?.();
       }
     }
     json(res, 200, { page: request.page, results });
@@ -212,14 +230,16 @@ const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise
     if (selected.length === 0) throw new Error("select at least one page");
     const selectedReports = session.reports?.filter((report) => selected.includes(report.page)) ?? [];
     const needsOcr = selectedReports.some((report) => report.verdict === "scanned");
-    const engine = needsOcr ? await createModel(request.modelId ?? "") : undefined;
-    const result = await pdfToBook(session.bytes, {
-      pages: selected,
-      ...(request.title && { title: request.title }),
-      ...(request.author && { author: request.author }),
-      language: request.language || "en",
-      ...(engine && { ocr: engine }),
-    });
+    const convert = async (engine?: OcrEngine) =>
+      await pdfToBook(session.bytes, {
+        pages: selected,
+        ...(request.title && { title: request.title }),
+        ...(request.author && { author: request.author }),
+        language: request.language || "en",
+        ...(engine && { ocr: engine }),
+      });
+    // The model stays loaded for the whole conversion and idles out afterwards.
+    const result = needsOcr ? await withModel(request.modelId ?? "", convert) : await convert();
     const conversionId = randomUUID();
     session.conversions.set(conversionId, { assets: result.assets });
     json(res, 200, {

@@ -4,7 +4,9 @@
   "scripts": {
     "test": "vitest run",
     "build": "tsc -p .",
-    "studio": "tsx src/cli.ts studio"
+    "studio": "npm run studio:build --silent && tsx src/cli.ts studio",
+    "studio:dev": "concurrently -k -n api,web -c blue,green \"tsx src/cli.ts studio\" \"vite --config studio/vite.config.ts\"",
+    "studio:build": "vite build --config studio/vite.config.ts"
   },
   "keywords": [],
   "author": "",
@@ -18,8 +20,15 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "@vitejs/plugin-react": "6.1.0",
+    "concurrently": "9.2.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
+    "vite": "8.2.2",
     "vitest": "^4.1.11"
   },
   "type": "module",

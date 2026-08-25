@@ -1,29 +1,64 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 import { paddleEngine, type OcrEngine } from "../pdf/ocr.js";
 
 export type ModelCapability = "layout" | "multilingual" | "tables" | "formulas";
 
-export type ModelInfo = {
+/** Where an installed runtime lives. Only `managed` runtimes may be removed. */
+export type ModelSource = "managed" | "external";
+
+export type ModelStatus = {
+  installed: boolean;
+  source: ModelSource | null;
+  /** Approximate bytes under `.bookforge-models/<id>/`; 0 for external runtimes. */
+  diskBytes: number;
+};
+
+export type ModelInfo = ModelStatus & {
   id: string;
   name: string;
   version: string;
   description: string;
   capabilities: ModelCapability[];
   runtime: "python";
-  installed: boolean;
   installLabel: string;
   firstRunNote: string;
+  /** True while a warm engine is held in memory for this model. */
+  loaded: boolean;
 };
 
 const PADDLE_ID = "paddleocr-vl-1.6";
-const managedRoot = () => join(process.cwd(), ".bookforge-models", PADDLE_ID, "venv");
+
+/**
+ * The only directory tree Bookforge ever deletes. Resolved and re-checked on
+ * every use so no id, symlink or env var can escape it — a user-provided
+ * interpreter (`BOOKFORGE_PADDLEOCR_PYTHON`, `.venv-paddleocr/`) is never ours.
+ */
+export const managedModelDir = (id: string) => {
+  const root = resolve(process.cwd(), ".bookforge-models");
+  const dir = resolve(root, id);
+  if (dir === root || !dir.startsWith(root + sep)) throw new Error(`refusing to manage ${dir}`);
+  return dir;
+};
+const managedRoot = () => join(managedModelDir(PADDLE_ID), "venv");
 const managedPython = () =>
   process.platform === "win32"
     ? join(managedRoot(), "Scripts", "python.exe")
     : join(managedRoot(), "bin", "python");
+
+/** Recursive apparent size. Symlinks are counted as neither file nor directory. */
+const dirBytes = async (dir: string): Promise<number> => {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  let total = 0;
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) total += await dirBytes(path);
+    else if (entry.isFile()) total += await stat(path).then((s) => s.size, () => 0);
+  }
+  return total;
+};
 
 const executable = async (path: string) => {
   try {
@@ -59,11 +94,13 @@ const run = async (command: string, args: string[]): Promise<string> =>
     });
   });
 
-type ModelProvider = {
-  info: Omit<ModelInfo, "installed">;
-  installed(): Promise<boolean>;
+export type ModelProvider = {
+  info: Omit<ModelInfo, keyof ModelStatus | "loaded">;
+  status(): Promise<ModelStatus>;
   create(): Promise<OcrEngine>;
   install(): Promise<string>;
+  /** Deletes what `install` put on disk. Must only ever touch `managedModelDir`. */
+  remove(): Promise<string>;
 };
 
 const paddleProvider: ModelProvider = {
@@ -77,8 +114,14 @@ const paddleProvider: ModelProvider = {
     installLabel: "Install runtime",
     firstRunNote: "The first comparison may download the official model weights.",
   },
-  async installed() {
-    return (await paddlePythonPath()) !== null;
+  async status() {
+    const python = await paddlePythonPath();
+    const managed = managedModelDir(PADDLE_ID);
+    return {
+      installed: python !== null,
+      source: python === null ? null : resolve(python).startsWith(managed + sep) ? "managed" : "external",
+      diskBytes: await dirBytes(managed),
+    };
   },
   async create() {
     const pythonPath = await paddlePythonPath();
@@ -89,12 +132,18 @@ const paddleProvider: ModelProvider = {
   async install() {
     if (await paddlePythonPath()) return "PaddleOCR-VL is already installed.";
     const basePython = process.env.BOOKFORGE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
-    await mkdir(join(process.cwd(), ".bookforge-models", PADDLE_ID), { recursive: true });
+    await mkdir(managedModelDir(PADDLE_ID), { recursive: true });
     await run(basePython, ["-m", "venv", managedRoot()]);
     const python = managedPython();
     await run(python, ["-m", "pip", "install", "--upgrade", "pip"]);
     await run(python, ["-m", "pip", "install", "paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.6.0"]);
     return "PaddleOCR-VL runtime installed. Official model weights download automatically on first use.";
+  },
+  async remove() {
+    const dir = managedModelDir(PADDLE_ID);
+    if (!(await stat(dir).catch(() => null))) return "No managed PaddleOCR-VL runtime on disk.";
+    await rm(dir, { recursive: true, force: true });
+    return "Removed the managed PaddleOCR-VL runtime. Downloaded weights stay in the shared PaddleX/HuggingFace cache.";
   },
 };
 
@@ -107,14 +156,80 @@ const provider = (id: string) => {
   return found;
 };
 
-export async function listModels(): Promise<ModelInfo[]> {
-  return await Promise.all(providers.map(async (item) => ({ ...item.info, installed: await item.installed() })));
+/** Adds a provider to the registry. The Studio picks it up with no other change. */
+export function registerProvider(item: ModelProvider): void {
+  providers.push(item);
 }
 
-export async function createModel(id: string): Promise<OcrEngine> {
-  return await provider(id).create();
+// Keep-alive, like `ollama`: a model stays warm between requests and unloads
+// itself once idle, so a comparison and the conversion that follows it pay the
+// weight-loading cost once. Engines are refcounted; only the last user closes.
+type Warm = { engine: Promise<OcrEngine>; users: number; idle?: ReturnType<typeof setTimeout> };
+const warm = new Map<string, Warm>();
+const idleMs = () => Number(process.env.BOOKFORGE_MODEL_IDLE_MS ?? 300_000);
+
+const shutdown = async (entry: Warm) => {
+  await entry.engine.then((engine) => engine.close?.()).catch(() => {});
+};
+
+const release = (id: string, entry: Warm) => {
+  const cached = warm.get(id) === entry;
+  if (!cached || idleMs() <= 0) {
+    if (cached) warm.delete(id);
+    void shutdown(entry);
+    return;
+  }
+  entry.idle = setTimeout(() => {
+    if (warm.get(id) !== entry) return;
+    warm.delete(id);
+    void shutdown(entry);
+  }, idleMs());
+  entry.idle.unref?.();
+};
+
+/**
+ * Runs `use` against a warm engine for `id`, loading one if needed. A failure
+ * evicts the engine so a crashed process never poisons the next request.
+ */
+export async function withModel<T>(id: string, use: (engine: OcrEngine) => Promise<T>): Promise<T> {
+  let entry = warm.get(id);
+  if (!entry) warm.set(id, (entry = { engine: provider(id).create(), users: 0 }));
+  if (entry.idle) clearTimeout(entry.idle);
+  entry.idle = undefined;
+  entry.users++;
+  try {
+    return await use(await entry.engine);
+  } catch (error) {
+    if (warm.get(id) === entry) warm.delete(id);
+    throw error;
+  } finally {
+    if (--entry.users === 0) release(id, entry);
+  }
+}
+
+export async function listModels(): Promise<ModelInfo[]> {
+  return await Promise.all(
+    providers.map(async (item) => ({ ...item.info, ...(await item.status()), loaded: warm.has(item.info.id) }))
+  );
 }
 
 export async function installModel(id: string): Promise<{ message: string }> {
   return { message: await provider(id).install() };
+}
+
+/** Frees memory now. An engine still serving a request closes when it finishes. */
+export async function unloadModel(id: string): Promise<{ message: string }> {
+  const { name } = provider(id).info;
+  const entry = warm.get(id);
+  if (!entry) return { message: `${name} is not loaded.` };
+  warm.delete(id);
+  if (entry.idle) clearTimeout(entry.idle);
+  if (entry.users === 0) await shutdown(entry);
+  return { message: `${name} unloaded from memory.` };
+}
+
+/** Destructive: unloads, then deletes the managed runtime from disk. */
+export async function removeModel(id: string): Promise<{ message: string }> {
+  await unloadModel(id);
+  return { message: await provider(id).remove() };
 }
