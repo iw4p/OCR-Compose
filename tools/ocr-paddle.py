@@ -13,8 +13,15 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stdout
 import json
+import re
 import sys
 from typing import Any
+
+# A figure region carries a bounding box and no text. Dropping the empty ones
+# would drop every illustration in the book, so vision labels survive with an
+# empty string; TypeScript crops them out of the page render.
+VISION_LABEL = re.compile(r"image|figure|chart|photo|seal|stamp", re.I)
+CAPTION_LABEL = re.compile(r"caption|vision[_ -]?footnote|(?:figure|chart|image|table)[_ -]?title", re.I)
 
 
 def _numbers(value: Any) -> list[float]:
@@ -53,7 +60,12 @@ def _blocks(result: Any) -> list[dict[str, Any]]:
         if not isinstance(block, dict):
             continue
         text = block.get("block_content")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str):
+            text = ""
+        label = str(block.get("block_label") or "text")
+        if not text.strip() and not (
+            VISION_LABEL.search(label) and not CAPTION_LABEL.search(label)
+        ):
             continue
         coordinates = _numbers(block.get("block_bbox"))
         if len(coordinates) < 4:
@@ -66,7 +78,7 @@ def _blocks(result: Any) -> list[dict[str, Any]]:
         normalized.append(
             {
                 "text": text,
-                "label": str(block.get("block_label") or "text"),
+                "label": label,
                 "x": max(0.0, x1 / width),
                 "y": max(0.0, y1 / height),
                 "w": max(0.0, min(width, x2) - max(0.0, x1)) / width,

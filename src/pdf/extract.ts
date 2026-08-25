@@ -84,11 +84,46 @@ function groupLines(spans: StextLine[], page: number): PdfLine[] {
   return lines;
 }
 
-/** Render one page (1-based) to PNG — input for the OCR adapter. */
-export function renderPagePng(bytes: Uint8Array, pageNo: number, scale = 2): Uint8Array {
+export type PageRender = {
+  png: Uint8Array;
+  width: number;
+  height: number;
+  /** Crop a normalized region (top-left origin, 0..1) out of the same pixmap. */
+  crop(x: number, y: number, w: number, h: number): Uint8Array | null;
+};
+
+/**
+ * Render one page (1-based) once — the PNG the OCR adapter reads, plus region
+ * crops taken from that same pixmap, so a figure on a scanned page costs no
+ * second render.
+ */
+export function renderPage(bytes: Uint8Array, pageNo: number, scale = 2): PageRender {
   const doc = mupdf.PDFDocument.openDocument(bytes, "application/pdf");
   const page = doc.loadPage(pageNo - 1);
-  return page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB).asPNG();
+  const pixmap = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB);
+  const width = pixmap.getWidth();
+  const height = pixmap.getHeight();
+  return {
+    png: pixmap.asPNG(),
+    width,
+    height,
+    crop(x, y, w, h) {
+      const x0 = Math.max(0, Math.round(x * width));
+      const y0 = Math.max(0, Math.round(y * height));
+      const x1 = Math.min(width, Math.round((x + w) * width));
+      const y1 = Math.min(height, Math.round((y + h) * height));
+      if (x1 - x0 < 2 || y1 - y0 < 2) return null;
+      // an axis-aligned warp of the rendered pixmap is a straight crop
+      return pixmap
+        .warp([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], x1 - x0, y1 - y0)
+        .asPNG();
+    },
+  };
+}
+
+/** Render one page (1-based) to PNG — input for the OCR adapter. */
+export function renderPagePng(bytes: Uint8Array, pageNo: number, scale = 2): Uint8Array {
+  return renderPage(bytes, pageNo, scale).png;
 }
 
 export function extractPdf(

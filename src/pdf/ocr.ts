@@ -44,26 +44,124 @@ const markdownTable = (text: string): string[][] | null => {
   return rows.length > 0 && rows.every((row) => row.length === rows[0]!.length) ? rows : null;
 };
 
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+const decodeEntities = (text: string) =>
+  text.replace(/&(#\d+|#x[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
+    if (body[0] !== "#") return NAMED_ENTITIES[body.toLowerCase()] ?? whole;
+    const code = body[1]?.toLowerCase() === "x" ? parseInt(body.slice(2), 16) : Number(body.slice(1));
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+  });
+
+/**
+ * PaddleOCR-VL returns tables as HTML. Cells carry the inline dialect (§4.3),
+ * so their text goes through the same escaping as prose. A table using
+ * colspan/rowspan is refused — the flat `rows` grid cannot hold it, and a
+ * degraded block is better than a silently reshaped one (§3.3).
+ */
+const htmlTable = (text: string): string[][] | null => {
+  if (!/<table[\s>]/i.test(text)) return null;
+  if (/\b(?:colspan|rowspan)\s*=\s*["']?\s*(?:[2-9]|\d\d)/i.test(text)) return null;
+  const cell = (html: string) => prose(decodeEntities(html.replace(/<[^>]*>/g, " ")));
+  const rows: string[][] = [];
+  for (const row of text.matchAll(/<tr\b[^>]*>([\s\S]*?)(?:<\/tr\s*>|$)/gi))
+    rows.push(
+      // tolerates unclosed cells: a cell ends at its tag, the next cell, or the row
+      [...row[1]!.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)(?=<\/t[dh]\s*>|<t[dh]\b|<\/tr\s*>|$)/gi)].map((m) =>
+        cell(m[1]!)
+      )
+    );
+  const width = Math.max(0, ...rows.map((row) => row.length));
+  if (rows.length === 0 || width === 0) return null;
+  // a short row is padded, never dropped — a missing cell is empty, not lost
+  const grid = rows.map((row) => [...row, ...Array<string>(width - row.length).fill("")]);
+  return grid.some((row) => row.some((value) => value !== "")) ? grid : null;
+};
+
+const tableRows = (text: string): string[][] | null => htmlTable(text) ?? markdownTable(text);
+
+const FURNITURE = /header|footer|page[_ -]?number|^number$/;
+// PaddleOCR-VL's `vision_footnote` is figure-associated text — an illustration
+// caption, not a page footnote — and `*_title` labels caption their region.
+const CAPTION = /caption|vision[_ -]?footnote|(?:figure|chart|image|table)[_ -]?title/;
+const VISION = /image|figure|chart|photo|seal|stamp/;
+
+const finite = (block: OcrBlock) => Number.isFinite(block.x + block.y + block.w + block.h);
+
+/**
+ * The figure regions of a page: a vision label with no recognized text (a
+ * chart the provider did read stays text rather than losing it), plausibly
+ * content-sized, and not the page itself. `pdfToBook` crops these out of the
+ * page render and writes them under the names `ocrImageFile` derives, so the
+ * mapper below stays a pure function of the OCR blocks.
+ */
+export function ocrFigures(blocks: OcrBlock[]): OcrBlock[] {
+  return blocks.filter((block) => {
+    const label = block.label.toLowerCase();
+    if (FURNITURE.test(label) || CAPTION.test(label) || !VISION.test(label)) return false;
+    if (block.text.trim() !== "") return false;
+    return finite(block) && block.w >= 0.02 && block.h >= 0.02 && block.w * block.h < 0.9;
+  });
+}
+
+/** Deterministic asset name for a cropped figure: page plus its bounding box. */
+export function ocrImageFile(page: number, block: OcrBlock): string {
+  const box = [block.x, block.y, block.w, block.h].map((n) => n.toFixed(4)).join(",");
+  const hash = createHash("sha1").update(`${page}|${box}`).digest("hex").slice(0, 12);
+  return `assets/fig-${page}-${hash}.png`;
+}
+
+/** Caption below or above a figure, overlapping it horizontally. */
+const adjacent = (caption: OcrBlock, figure: OcrBlock) => {
+  const overlap = Math.min(caption.x + caption.w, figure.x + figure.w) - Math.max(caption.x, figure.x);
+  if (overlap < caption.w * 0.5) return false;
+  return Math.max(figure.y - (caption.y + caption.h), caption.y - (figure.y + figure.h)) < 0.05;
+};
+
 /**
  * Preserve the semantic boundaries a document model already found. Native
  * line unwrapping is deliberately not involved here.
  */
 export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[] {
   const out: Block[] = [];
-  for (const block of blocks) {
-    if (!Number.isFinite(block.x + block.y + block.w + block.h)) continue;
-    const raw = block.text.trim();
-    if (!raw) continue;
-    const label = block.label.toLowerCase();
-    if (/header|footer|page[_ -]?number|^number$/.test(label)) continue;
+  // source geometry, parallel to `out`; it binds captions below and then dies
+  // here — coordinates never reach book.json (I2).
+  const boxes: OcrBlock[] = [];
+  const figures = new Set(ocrFigures(blocks));
+  const emit = (block: Block, source: OcrBlock) => {
+    out.push(block);
+    boxes.push(source);
+  };
 
-    if (/formula|equation/.test(label)) {
-      out.push({ type: "formula", display: true, tex: raw, page });
+  for (const block of blocks) {
+    if (!finite(block)) continue;
+    const label = block.label.toLowerCase();
+    // I3 wants these demoted, not deleted, but `epub3` renders every block it
+    // is given — demoting today would print the running head on every page.
+    if (FURNITURE.test(label)) continue;
+    if (figures.has(block)) {
+      emit({ type: "image", file: ocrImageFile(page, block), page }, block);
       continue;
     }
-    if (/table/.test(label)) {
-      const rows = markdownTable(raw);
-      out.push(rows ? { type: "table", rows, page } : { type: "text", role: "table-source", text: prose(raw), page });
+    const raw = block.text.trim();
+    if (!raw) continue;
+
+    if (/formula|equation/.test(label)) {
+      emit({ type: "formula", display: true, tex: raw, page }, block);
+      continue;
+    }
+    if (/table/.test(label) && !CAPTION.test(label)) {
+      const rows = tableRows(raw);
+      emit(
+        rows ? { type: "table", rows, page } : { type: "text", role: "table-source", text: prose(raw), page },
+        block
+      );
       continue;
     }
     if (/list/.test(label)) {
@@ -73,7 +171,7 @@ export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[]
         .filter(Boolean)
         .map((item) => [{ type: "text", text: prose(item), page }] satisfies Block[]);
       if (items.length > 0) {
-        out.push({ type: "list", ordered: /^\s*\d+[.)]/.test(raw), items, page });
+        emit({ type: "list", ordered: /^\s*\d+[.)]/.test(raw), items, page }, block);
         continue;
       }
     }
@@ -82,19 +180,33 @@ export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[]
     const letters = raw.replace(/[^\p{L}]/gu, "");
     const inferredCapsTitle =
       label === "text" && raw.length <= 80 && letters !== "" && letters === letters.toUpperCase();
-    if (/doc[_ -]?title/.test(label)) out.push({ type: "heading", level: 1, text, page });
+    if (CAPTION.test(label)) emit({ type: "text", role: "caption", text, page }, block);
+    else if (/doc[_ -]?title/.test(label)) emit({ type: "heading", level: 1, text, page }, block);
     else if (/paragraph[_ -]?title|section[_ -]?title|title/.test(label) || inferredCapsTitle)
-      out.push({ type: "heading", level: 2, text, page });
+      emit({ type: "heading", level: 2, text, page }, block);
     else {
-      const role = /caption|figure[_ -]?title/.test(label)
-        ? "caption"
-        : /footnote/.test(label)
-          ? "footnote-source"
-          : undefined;
-      out.push({ type: "text", text, page, ...(role && { role }) });
+      const role = /footnote/.test(label) ? "footnote-source" : undefined;
+      emit({ type: "text", text, page, ...(role && { role }) }, block);
     }
   }
-  return out;
+
+  // The one sliver of `bind` (tool 10) this page's geometry makes free: a
+  // caption touching a figure becomes that figure's caption. Anything
+  // unmatched stays a `role: "caption"` paragraph.
+  const bound = new Set<number>();
+  for (let i = 0; i < out.length; i++) {
+    const block = out[i]!;
+    if (block.type !== "text" || block.role !== "caption") continue;
+    for (const j of [i + 1, i - 1]) {
+      const figure = out[j];
+      if (!figure || figure.type !== "image" || figure.caption !== undefined) continue;
+      if (!adjacent(boxes[i]!, boxes[j]!)) continue;
+      figure.caption = block.text;
+      bound.add(i);
+      break;
+    }
+  }
+  return bound.size > 0 ? out.filter((_, i) => !bound.has(i)) : out;
 }
 
 type HelperReply = { id: number; blocks?: OcrBlock[]; error?: string };
@@ -240,8 +352,10 @@ export function paddleEngine(opts: PaddleEngineOptions = {}): OcrEngine {
   return {
     name: "PaddleOCR-VL 1.6",
     async recognize(png, languages) {
+      // the suffix is the helper's output contract, not the model: results
+      // cached before figure regions were kept have no illustrations in them
       const key = createHash("sha256")
-        .update("PaddleOCR-VL-1.6\0")
+        .update("PaddleOCR-VL-1.6+figures\0")
         .update(png)
         .update("\0" + languages.join(","))
         .digest("hex");

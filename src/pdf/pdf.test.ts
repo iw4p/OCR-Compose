@@ -1,14 +1,16 @@
 import { describe, expect, test } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { pdfToBook } from "./pdf.js";
-import { extractPdf } from "./extract.js";
+import { extractPdf, renderPage } from "./extract.js";
 import { textlayer } from "./textlayer.js";
 import { validateBook, type Block } from "../contract.js";
+import type { OcrBlock, OcrEngine } from "./ocr.js";
 import { writeEpub } from "../epub/write.js";
 import { readEpub } from "../epub/read.js";
 
 const ALICE = "corpus/pdf/alices-adventures-in-wonderland.pdf";
 const DOUBLE = "corpus/pdf/alice-doublelayer.pdf";
+const SCAN = "corpus/pdf/alice-scan.pdf";
 
 describe.skipIf(!existsSync(ALICE))("born-digital PDF → contract (Alice, Planet eBook)", async () => {
   const { book } = await pdfToBook(new Uint8Array(readFileSync(ALICE)), {
@@ -69,6 +71,63 @@ describe.skipIf(!existsSync(DOUBLE))("double-layer PDF routing (Alice, archive.o
     await expect(
       pdfToBook(bytes, { title: "Alice in Wonderland", language: "en" })
     ).rejects.toThrow("PaddleOCR-VL 1.6");
+  });
+});
+
+// The real page-19 layout PaddleOCR-VL 1.6 returns for alice-scan.pdf, so the
+// scanned path can be exercised without the optional Python dependency.
+const ALICE_PAGE_19: OcrBlock[] = [
+  { text: "DOWN THE RABBIT-HOLE", label: "header", x: 0.283, y: 0.064, w: 0.427, h: 0.021 },
+  { text: "13", label: "number", x: 0.854, y: 0.067, w: 0.035, h: 0.018 },
+  { text: "behind it when she turned the corner,", label: "text", x: 0.1, y: 0.097, w: 0.792, h: 0.102 },
+  { text: "", label: "image", x: 0.122, y: 0.352, w: 0.765, h: 0.432 },
+  {
+    text: "She tried the little golden key in the lock.",
+    label: "vision_footnote",
+    x: 0.262,
+    y: 0.802,
+    w: 0.471,
+    h: 0.02,
+  },
+  { text: "Suddenly she came upon a little table.", label: "text", x: 0.102, y: 0.831, w: 0.795, h: 0.106 },
+];
+
+describe.skipIf(!existsSync(SCAN))("scanned PDF illustrations (Alice, archive.org)", () => {
+  const engine = (): OcrEngine => ({ name: "stub", recognize: async () => ALICE_PAGE_19 });
+
+  test("crops the figure region out of the page render and binds its caption", async () => {
+    const bytes = new Uint8Array(readFileSync(SCAN));
+    const { book, assets } = await pdfToBook(bytes, {
+      title: "Alice in Wonderland",
+      language: "en",
+      pages: [19],
+      ocr: engine(),
+    });
+    expect(validateBook(book)).toEqual([]);
+
+    const image = book.content.find((block) => block.type === "image");
+    expect(image).toMatchObject({
+      type: "image",
+      page: 19,
+      caption: "She tried the little golden key in the lock.",
+    });
+    const png = assets.get((image as Extract<Block, { type: "image" }>).file);
+    expect(png).toBeDefined();
+    // a real PNG, and a crop rather than the whole page
+    expect([...png!.slice(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(png!.length).toBeLessThan(renderPage(bytes, 19, 3).png.length);
+  });
+
+  test("packs the cropped figure into the EPUB", async () => {
+    const { book, assets } = await pdfToBook(new Uint8Array(readFileSync(SCAN)), {
+      title: "Alice in Wonderland",
+      language: "en",
+      pages: [19],
+      ocr: engine(),
+    });
+    const { book: back } = await readEpub(await writeEpub(book, assets));
+    const image = back.content.find((block) => block.type === "image");
+    expect(image).toMatchObject({ caption: "She tried the little golden key in the lock." });
   });
 });
 

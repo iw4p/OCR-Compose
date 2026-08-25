@@ -4,10 +4,10 @@
 // through source-specific interpretation before converging as contract blocks.
 // Geometry dies here — the Book carries only roles, text, and provenance.
 import type { Block, Book } from "../contract.js";
-import { extractPdf, renderPagePng, type PdfImage } from "./extract.js";
+import { extractPdf, renderPage, type PdfImage } from "./extract.js";
 import { classify, detectHeadings, bodyFontSize, unwrap } from "./passes.js";
 import { textlayer, type PageReport, type TextLayerVerdict } from "./textlayer.js";
-import { ocrBlocksToBookBlocks, type OcrBlock, type OcrEngine } from "./ocr.js";
+import { ocrBlocksToBookBlocks, ocrFigures, ocrImageFile, type OcrBlock, type OcrEngine } from "./ocr.js";
 
 export type PdfOptions = {
   title?: string;
@@ -56,16 +56,23 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
   const needsOcr = reports.filter((r) => r.verdict === "scanned");
   const ocrPages = new Set<number>();
   const ocrByPage = new Map<number, OcrBlock[]>();
+  const assets = new Map<string, Uint8Array>();
   if (opts.ocr && needsOcr.length > 0) {
     const langs = opts.language ? [opts.language] : [];
     let done = 0;
     try {
       for (const r of needsOcr) {
-        const raw = await opts.ocr.recognize(renderPagePng(bytes, r.page, 3), langs);
+        // one render per page, shared by the OCR provider and the figure crops
+        const render = renderPage(bytes, r.page, 3);
+        const raw = await opts.ocr.recognize(render.png, langs);
         const semantic = ocrBlocksToBookBlocks(raw, r.page);
         if (semantic.length > 0) {
           ocrByPage.set(r.page, raw);
           ocrPages.add(r.page);
+          for (const figure of ocrFigures(raw)) {
+            const png = render.crop(figure.x, figure.y, figure.w, figure.h);
+            if (png) assets.set(ocrImageFile(r.page, figure), png);
+          }
         }
         opts.onProgress?.(++done, needsOcr.length);
       }
@@ -124,7 +131,11 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
     }
   }
   for (const [page, raw] of ocrByPage)
-    for (const block of ocrBlocksToBookBlocks(raw, page)) unordered.push({ block, order: order++ });
+    for (const block of ocrBlocksToBookBlocks(raw, page)) {
+      // a figure whose crop was refused would reference an asset nobody wrote
+      if (block.type === "image" && !assets.has(block.file)) continue;
+      unordered.push({ block, order: order++ });
+    }
 
   unordered.sort((a, b) => (firstPageOf(a.block) ?? 0) - (firstPageOf(b.block) ?? 0) || a.order - b.order);
   const blocks = unordered.map(({ block }) => block);
@@ -137,10 +148,10 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
     block.id = id;
   }
 
-  // illustrations: only from native pages, only plausibly-content-sized,
-  // inserted after the last block of their (printed) page. Second extract
-  // pass pulls bytes for just those pages (scan images would blow the heap).
-  const assets = new Map<string, Uint8Array>();
+  // illustrations: embedded bytes from native pages, only plausibly-content-
+  // sized, inserted after the last block of their (printed) page. Second
+  // extract pass pulls bytes for just those pages (scan images would blow the
+  // heap). Scanned pages got theirs cropped from the page render above.
   const nativePageNumbers = new Set(
     reports.filter((r) => r.verdict === "native").map((r) => r.page)
   );
