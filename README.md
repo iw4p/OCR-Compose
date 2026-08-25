@@ -83,12 +83,15 @@ PDF:
 - **`ocr-adapter`** — for scanned books: the complete PaddleOCR-VL 1.6
   document pipeline (layout analysis + VLM). Its semantic paragraphs,
   headings, tables and formulas map directly into contract blocks; they are
-  never degraded into synthetic PDF lines. Results are cached, so re-runs are
-  instant.
+  never degraded into synthetic PDF lines. Illustrations are cropped out of
+  the page render and written as assets, with adjacent captions bound to
+  them, and its HTML tables are parsed into real `rows`. Results are cached,
+  so re-runs are instant.
 
-Not built yet: table/math structure recognition (they degrade to images, by
-design), TOC cross-checking for books whose chapter titles look like running
-heads, and figure extraction from scanned pages.
+Not built yet: math structure recognition and tables too irregular to parse
+(`colspan`/`rowspan`) — both degrade to images by design — TOC cross-checking
+for books whose chapter titles look like running heads, and figure extraction
+beyond embedded images on the native path.
 
 ## Using it
 

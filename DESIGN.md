@@ -613,7 +613,17 @@ absorption, footer stripped, printed-page provenance incl. mid-paragraph
 break offsets). PaddleOCR-VL returns layout-aware reading order and recognizes
 109 languages; `--lang` remains part of the cache identity and book metadata.
 Known limits, recorded not hidden: PaddleOCR-VL corpus quality still needs a
-fresh full-book benchmark; no figure extraction on scanned pages yet.*
+fresh full-book benchmark.*
+
+*Status 2026-08-25: scanned pages now yield figures and tables. Figure regions
+are cropped from the page render the OCR adapter already produced and written
+as assets, with an adjacent caption bound to the figure where the geometry is
+unambiguous; PaddleOCR-VL's HTML tables are parsed into `rows`, so §3.3's
+"`rows` present → `<table>`" path is live on the scanned route (`colspan`/
+`rowspan` still degrades to an image, deliberately). Known limits: no figure
+extraction on the **native** path beyond embedded images, and captions that do
+not sit adjacent to their figure stay standalone paragraphs until `bind`
+(tool 10) exists.*
 
 ### 7.5 Later
 
