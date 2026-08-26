@@ -223,10 +223,14 @@ export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[]
   return bound.size > 0 ? out.filter((_, i) => !bound.has(i)) : out;
 }
 
-type HelperReply = { id: number; blocks?: OcrBlock[]; error?: string };
-type Pending = { resolve: (blocks: OcrBlock[]) => void; reject: (error: Error) => void };
+type HelperReply = { id: number; error?: string } & Record<string, unknown>;
+type Pending = { resolve: (reply: HelperReply) => void; reject: (error: Error) => void };
 
-class PaddleSession {
+/**
+ * A model's Python helper, held open for the whole book: one JSON request per
+ * line in, one reply per line out, matched by `id`. Model weights load once.
+ */
+class HelperSession {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly pending = new Map<number, Pending>();
   private nextId = 1;
@@ -235,27 +239,23 @@ class PaddleSession {
   private closing = false;
 
   constructor(
+    private readonly name: string,
     private readonly pythonPath: string,
     private readonly helperPath: string,
-    private readonly options: {
-      device?: string;
-      vlBackend?: string;
-      vlServerUrl?: string;
-      vlModelName?: string;
-    }
+    private readonly args: string[]
   ) {}
 
-  async recognize(path: string): Promise<OcrBlock[]> {
+  async recognize<T>(request: Record<string, unknown>): Promise<T> {
     await this.start();
     const id = this.nextId++;
-    return await new Promise<OcrBlock[]>((resolve, reject) => {
+    return (await new Promise<HelperReply>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.child!.stdin.write(JSON.stringify({ id, path }) + "\n", (error) => {
+      this.child!.stdin.write(JSON.stringify({ ...request, id }) + "\n", (error) => {
         if (!error) return;
         this.pending.delete(id);
         reject(error);
       });
-    });
+    })) as T;
   }
 
   async close(): Promise<void> {
@@ -272,16 +272,9 @@ class PaddleSession {
   private async start(): Promise<void> {
     if (this.child) return;
     await access(this.helperPath).catch(() => {
-      throw new Error(`PaddleOCR-VL helper not found at ${this.helperPath}`);
+      throw new Error(`${this.name} helper not found at ${this.helperPath}`);
     });
-    const args = [
-      this.helperPath,
-      ...(this.options.device ? ["--device", this.options.device] : []),
-      ...(this.options.vlBackend ? ["--vl-backend", this.options.vlBackend] : []),
-      ...(this.options.vlServerUrl ? ["--vl-server-url", this.options.vlServerUrl] : []),
-      ...(this.options.vlModelName ? ["--vl-model-name", this.options.vlModelName] : []),
-    ];
-    const child = spawn(this.pythonPath, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(this.pythonPath, [this.helperPath, ...this.args], { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -294,10 +287,7 @@ class PaddleSession {
       if (!this.closing && (code !== 0 || this.pending.size > 0)) {
         const detail = this.stderr.trim();
         this.failAll(
-          new Error(
-            `PaddleOCR-VL helper exited with code ${code ?? "unknown"}` +
-              (detail ? `:\n${detail}` : "")
-          )
+          new Error(`${this.name} helper exited with code ${code ?? "unknown"}` + (detail ? `:\n${detail}` : ""))
         );
       }
       this.child = null;
@@ -316,14 +306,14 @@ class PaddleSession {
       try {
         reply = JSON.parse(line) as HelperReply;
       } catch {
-        this.failAll(new Error(`invalid output from PaddleOCR-VL helper: ${line.slice(0, 200)}`));
+        this.failAll(new Error(`invalid output from the ${this.name} helper: ${line.slice(0, 200)}`));
         return;
       }
       const pending = this.pending.get(reply.id);
       if (!pending) continue;
       this.pending.delete(reply.id);
-      if (reply.error) pending.reject(new Error(`PaddleOCR-VL failed: ${reply.error}`));
-      else pending.resolve(reply.blocks ?? []);
+      if (reply.error) pending.reject(new Error(`${this.name} failed: ${reply.error}`));
+      else pending.resolve(reply);
     }
   }
 
@@ -339,8 +329,8 @@ class PaddleSession {
  * compared in the Studio is not recognized — or paid for — twice.
  *
  * `identity` must name the provider *and* the output contract of the adapter
- * around it (model, version, endpoint), because an entry one provider wrote
- * never suits another. `dir` is per provider, so one provider's results can be
+ * around it (model, version, the adapter's own revision), because an entry one
+ * provider wrote never suits another. `dir` is per provider, so one provider's results can be
  * deleted without touching another's; `null` disables the cache. A cache that
  * cannot be read, parsed or written is a miss, never a failed conversion.
  */
@@ -368,6 +358,27 @@ export function ocrCache(dir: string | null, identity: string) {
   };
 }
 
+/** Page images a helper reads by path: written under the cache key, then removed. */
+function pageImages(prefix: string) {
+  let dir: string | null = null;
+  return {
+    async use<T>(key: string, png: Uint8Array, run: (path: string) => Promise<T>): Promise<T> {
+      dir ??= await mkdtemp(join(tmpdir(), prefix));
+      const path = join(dir, `${key}.png`);
+      await writeFile(path, png);
+      try {
+        return await run(path);
+      } finally {
+        await rm(path, { force: true });
+      }
+    },
+    async clean() {
+      if (dir) await rm(dir, { recursive: true, force: true });
+      dir = null;
+    },
+  };
+}
+
 export type PaddleEngineOptions = {
   /** Python 3.9–3.13 environment containing paddlepaddle and paddleocr. */
   pythonPath?: string;
@@ -390,35 +401,197 @@ export function paddleEngine(opts: PaddleEngineOptions = {}): OcrEngine {
   const vlServerUrl = opts.vlServerUrl ?? process.env.BOOKFORGE_PADDLEOCR_VL_SERVER_URL;
   const vlModelName = opts.vlModelName ?? process.env.BOOKFORGE_PADDLEOCR_VL_MODEL_NAME;
   const cacheDir = opts.cacheDir === undefined ? ".bookforge-cache/ocr-paddle-vl-1.6" : opts.cacheDir;
-  const session = new PaddleSession(pythonPath, helperPath, {
-    ...(device && { device }),
-    ...(vlBackend && { vlBackend }),
-    ...(vlServerUrl && { vlServerUrl }),
-    ...(vlModelName && { vlModelName }),
-  });
+  const session = new HelperSession("PaddleOCR-VL", pythonPath, helperPath, [
+    ...(device ? ["--device", device] : []),
+    ...(vlBackend ? ["--vl-backend", vlBackend] : []),
+    ...(vlServerUrl ? ["--vl-server-url", vlServerUrl] : []),
+    ...(vlModelName ? ["--vl-model-name", vlModelName] : []),
+  ]);
   // the suffix is this helper's output contract, not the model: results cached
   // before figure regions were kept have no illustrations in them
   const cache = ocrCache(cacheDir, "PaddleOCR-VL-1.6+figures");
-  let workDir: string | null = null;
+  const images = pageImages("bookforge-paddleocr-");
 
   return {
     name: "PaddleOCR-VL 1.6",
     recognize(png, languages) {
-      return cache(png, languages, async (key) => {
-        workDir ??= await mkdtemp(join(tmpdir(), "bookforge-paddleocr-"));
-        const imagePath = join(workDir, `${key}.png`);
-        await writeFile(imagePath, png);
-        try {
-          return await session.recognize(imagePath);
-        } finally {
-          await rm(imagePath, { force: true });
-        }
-      });
+      return cache(png, languages, (key) =>
+        images.use(key, png, async (path) => {
+          const reply = await session.recognize<{ blocks?: OcrBlock[] }>({ path });
+          return reply.blocks ?? [];
+        })
+      );
     },
     async close() {
       await session.close();
-      if (workDir) await rm(workDir, { recursive: true, force: true });
-      workDir = null;
+      await images.clean();
+    },
+  };
+}
+
+/**
+ * OnnxTR's eleven DocLayNet layout classes, mapped onto the vocabulary
+ * `ocrBlocksToBookBlocks` reads. Two of them are traps:
+ *
+ * - `Section-header` is a chapter or section heading, but it matches the
+ *   mapper's furniture regex, so raw it would be hidden as a running head.
+ * - `Picture` matches nothing at all, so raw it would be dropped as empty.
+ *
+ * `Formula` becomes a picture on purpose: OnnxTR recognizes text, not math, so
+ * the pixels are the only faithful record (§3.3) — its characters are dropped
+ * rather than passed off as TeX.
+ */
+const ONNXTR_LABELS: Record<string, string> = {
+  caption: "caption",
+  footnote: "footnote",
+  formula: "image",
+  "list-item": "list",
+  "page-footer": "footer",
+  "page-header": "header",
+  picture: "image",
+  "section-header": "paragraph_title",
+  table: "table",
+  text: "text",
+  title: "doc_title",
+};
+
+/** A running head that is only a numeral is a page number, not a title. */
+const NUMERAL = /^[\s.\-–—[\]()]*(?:\d{1,4}|[ivxlcdm]{1,7})[\s.\-–—[\]()]*$/i;
+
+/** An unknown class becomes prose: never an invented heading, never furniture. */
+export function onnxtrLabel(raw: string, text = ""): string {
+  const label = ONNXTR_LABELS[raw.trim().toLowerCase()] ?? "text";
+  return (label === "header" || label === "footer") && NUMERAL.test(text) ? "number" : label;
+}
+
+export type OnnxtrCell = { row_start: number; row_end: number; col_start: number; col_end: number; value: string };
+export type OnnxtrItem = {
+  label: string;
+  text?: string;
+  /** [x0, y0, x1, y1], relative to the page with a top-left origin. */
+  box: number[];
+  rows?: number;
+  cols?: number;
+  cells?: OnnxtrCell[];
+};
+
+const escapeHtml = (text: string) => text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
+
+/**
+ * Table cells to the HTML `htmlTable` already parses, rather than a second
+ * table code path. A merged cell keeps its `colspan`/`rowspan`, so the shared
+ * parser refuses the grid and degrades it instead of silently reshaping it.
+ */
+export function onnxtrTableHtml(item: OnnxtrItem): string {
+  const cells = item.cells ?? [];
+  if (cells.length === 0) return "";
+  const rows = item.rows ?? Math.max(0, ...cells.map((cell) => cell.row_end + 1));
+  const html: string[] = [];
+  for (let row = 0; row < rows; row++) {
+    const inRow = cells.filter((cell) => cell.row_start === row).sort((a, b) => a.col_start - b.col_start);
+    html.push(
+      "<tr>" +
+        inRow
+          .map((cell) => {
+            const span = (n: number, name: string) => (n > 1 ? ` ${name}="${n}"` : "");
+            return `<td${span(cell.col_end - cell.col_start + 1, "colspan")}${span(
+              cell.row_end - cell.row_start + 1,
+              "rowspan"
+            )}>${escapeHtml(cell.value)}</td>`;
+          })
+          .join("") +
+        "</tr>"
+    );
+  }
+  return `<table>${html.join("")}</table>`;
+}
+
+const box = (item: OnnxtrItem): OcrBlock | null => {
+  const [x0, y0, x1, y1] = item.box.map((value) => Math.min(1, Math.max(0, value)));
+  if (![x0, y0, x1, y1].every((value) => Number.isFinite(value)) || x1! <= x0! || y1! <= y0!) return null;
+  return { text: "", label: "", x: x0!, y: y0!, w: x1! - x0!, h: y1! - y0! };
+};
+
+/**
+ * The helper's reading-ordered items plus its textless layout regions, as
+ * normalized blocks. A picture is placed at the first item that starts below
+ * it, which puts it next to its caption on the single-column pages books are.
+ */
+export function onnxtrBlocks(items: OnnxtrItem[], regions: OnnxtrItem[]): OcrBlock[] {
+  const blocks: OcrBlock[] = [];
+  for (const item of items) {
+    const label = onnxtrLabel(item.label, item.text ?? "");
+    // the picture itself arrives as a region, with the region's own box
+    if (label === "image") continue;
+    const shape = box(item);
+    const text = label === "table" ? onnxtrTableHtml(item) : (item.text ?? "").trim();
+    if (!shape || !text) continue;
+    // one bullet per line, so the mapper's split rebuilds the whole list
+    const flat = text.replace(/\s*\n+\s*/g, " ");
+    const previous = blocks[blocks.length - 1];
+    if (label === "list" && previous?.label === "list") {
+      const [right, bottom] = [
+        Math.max(previous.x + previous.w, shape.x + shape.w),
+        Math.max(previous.y + previous.h, shape.y + shape.h),
+      ];
+      previous.text += "\n" + flat;
+      previous.x = Math.min(previous.x, shape.x);
+      previous.y = Math.min(previous.y, shape.y);
+      previous.w = right - previous.x;
+      previous.h = bottom - previous.y;
+      continue;
+    }
+    blocks.push({ ...shape, label, text: label === "list" ? flat : text });
+  }
+
+  for (const region of regions.sort((a, b) => a.box[1]! - b.box[1]!)) {
+    const shape = box(region);
+    if (!shape) continue;
+    const after = blocks.findIndex((block) => block.y > shape.y || (block.y === shape.y && block.x > shape.x));
+    blocks.splice(after === -1 ? blocks.length : after, 0, { ...shape, label: onnxtrLabel(region.label) });
+  }
+  return blocks;
+}
+
+/**
+ * The default recognizers share a Latin-only 126-character vocabulary. A book
+ * in anything else needs the multilingual weights (~53 Latin-script languages
+ * plus Cyrillic, Greek and Hebrew), which are downloaded only when asked for.
+ */
+const LATIN_DEFAULT = new Set(["", "en", "fr", "de", "es", "it", "pt", "nl"]);
+
+export const onnxtrRecognizer = (languages: string[]): string =>
+  languages.every((language) => LATIN_DEFAULT.has(language.toLowerCase().split(/[-_]/)[0]!))
+    ? "parseq"
+    : "hub:Felix92/onnxtr-parseq-multilingual-v1";
+
+export type OnnxtrEngineOptions = { pythonPath?: string; helperPath?: string; cacheDir?: string | null };
+
+export function onnxtrEngine(opts: OnnxtrEngineOptions = {}): OcrEngine {
+  const pythonPath = opts.pythonPath ?? process.env.BOOKFORGE_ONNXTR_PYTHON ?? "python3";
+  const helperPath = opts.helperPath ?? fileURLToPath(new URL("../../tools/ocr-onnxtr.py", import.meta.url));
+  const cacheDir = opts.cacheDir === undefined ? ".bookforge-cache/ocr-onnxtr" : opts.cacheDir;
+  const session = new HelperSession("OnnxTR", pythonPath, helperPath, []);
+  // the recognizer is a pure function of the languages, which the key covers
+  const cache = ocrCache(cacheDir, "OnnxTR-0.9+db_resnet50+parseq+layout+tables");
+  const images = pageImages("bookforge-onnxtr-");
+
+  return {
+    name: "OnnxTR 0.9",
+    recognize(png, languages) {
+      return cache(png, languages, (key) =>
+        images.use(key, png, async (path) => {
+          const reply = await session.recognize<{ items?: OnnxtrItem[]; regions?: OnnxtrItem[] }>({
+            path,
+            reco: onnxtrRecognizer(languages),
+          });
+          return onnxtrBlocks(reply.items ?? [], reply.regions ?? []);
+        })
+      );
+    },
+    async close() {
+      await session.close();
+      await images.clean();
     },
   };
 }

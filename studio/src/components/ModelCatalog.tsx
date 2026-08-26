@@ -9,26 +9,22 @@ const onDisk = (bytes: number) => {
   return `${value.toFixed(value < 10 && power > 0 ? 1 : 0)} ${units[power]}`;
 };
 
-const host = (url: string) => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-};
-
 export function ModelCatalog({
   models,
   selected,
   onToggle,
   onAction,
   pending,
+  convertModelId,
+  onChooseConvertModel,
 }: {
   models: ModelInfo[];
   selected: Set<string>;
   onToggle: (id: string) => void;
   onAction: (id: string, action: ModelAction) => void;
   pending: Set<string>;
+  convertModelId: string | null;
+  onChooseConvertModel: (id: string) => void;
 }) {
   // Removal is irreversible, so it is always a two-click confirmation.
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
@@ -42,16 +38,17 @@ export function ModelCatalog({
         return (
           <div key={model.id} className="model-card">
             <label className="model-card-select">
-              <input type="checkbox" checked={selected.has(model.id)} onChange={() => onToggle(model.id)} disabled={!model.installed} />
+              <input
+                type="checkbox"
+                title="compare this model"
+                checked={selected.has(model.id)}
+                onChange={() => onToggle(model.id)}
+                disabled={!model.installed}
+              />
               <div>
                 <div className="model-card-title">
                   {model.name} <span className="muted">{model.version}</span>
                   {model.loaded && <span className="chip chip-loaded">loaded</span>}
-                  {model.endpoint && (
-                    <span className={`chip ${model.endpoint.local ? "chip-local" : "chip-remote"}`}>
-                      {model.endpoint.local ? "local endpoint" : "remote endpoint"}
-                    </span>
-                  )}
                 </div>
                 <p className="model-card-desc">{model.description}</p>
                 <div className="model-card-caps">
@@ -67,13 +64,21 @@ export function ModelCatalog({
             {model.installed ? (
               <div className="model-card-status">
                 <span className="muted small">
-                  {model.endpoint
-                    ? model.endpoint.url
-                    : model.source === "managed"
-                      ? `${size ?? "0 B"} on disk`
-                      : "runtime provided by your environment"}
+                  {model.source === "managed" ? `${size ?? "0 B"} on disk` : "runtime provided by your environment"}
                 </span>
                 <span className="model-card-actions">
+                  {/* Two questions, not one: what to compare, and what to convert with. */}
+                  <label className="model-card-convert">
+                    <input
+                      type="radio"
+                      // its own group: a browser lets one radio per name be
+                      // checked, and the compare table shows the same choice
+                      name="convert-model-card"
+                      checked={convertModelId === model.id}
+                      onChange={() => onChooseConvertModel(model.id)}
+                    />
+                    convert with this
+                  </label>
                   <button type="button" className="btn-ghost btn-small" disabled={busy || !model.loaded} onClick={() => onAction(model.id, "unload")}>
                     unload
                   </button>
@@ -86,19 +91,11 @@ export function ModelCatalog({
               </div>
             ) : (
               <div className="model-card-status">
-                <span className="muted small">{model.endpoint ? `nothing answered at ${model.endpoint.url}` : "not installed"}</span>
+                <span className="muted small">not installed</span>
                 <button type="button" className="btn-secondary btn-small" disabled={busy} onClick={() => onAction(model.id, "install")}>
-                  {busy ? (model.endpoint ? "checking..." : "installing...") : model.installLabel}
+                  {busy ? "installing..." : model.installLabel}
                 </button>
               </div>
-            )}
-
-            {/* An endpoint outside this machine breaks the local-only promise, so it is never quiet. */}
-            {model.endpoint && !model.endpoint.local && (
-              <p className="status-error small">
-                Not local: every selected page is uploaded to <strong>{host(model.endpoint.url)}</strong> as an image. Point{" "}
-                <code>BOOKFORGE_VLM_URL</code> at a local server to keep the book on this machine.
-              </p>
             )}
 
             {confirmRemove === model.id ? (

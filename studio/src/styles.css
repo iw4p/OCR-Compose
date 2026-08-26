@@ -329,8 +329,18 @@ code {
 }
 .model-card-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
   margin-left: auto;
+}
+.model-card-convert {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
 }
 .model-card-confirm {
   margin-top: 8px;
@@ -372,17 +382,6 @@ code {
   color: var(--accent-ink);
   background: var(--accent);
   border-color: var(--accent);
-  vertical-align: middle;
-}
-.chip-local {
-  margin-left: 6px;
-  color: var(--native);
-  vertical-align: middle;
-}
-.chip-remote {
-  margin-left: 6px;
-  color: var(--error);
-  border-color: var(--error);
   vertical-align: middle;
 }
 .chip-heading {

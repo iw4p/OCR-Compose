@@ -59,9 +59,18 @@ export function SelectScreen({
       />
       <div className="select-side">
         <h3>Models</h3>
-        <ModelCatalog models={models} selected={compareSelection} onToggle={onToggleCompareModel} onAction={onModelAction} pending={pending} />
+        <ModelCatalog
+          models={models}
+          selected={compareSelection}
+          onToggle={onToggleCompareModel}
+          onAction={onModelAction}
+          pending={pending}
+          convertModelId={convertModelId}
+          onChooseConvertModel={onChooseConvertModel}
+        />
 
         <h3>Compare</h3>
+        <p className="muted small">Optional. Not sure which model? Tick a few above and try them on one page.</p>
         <ComparePanel
           documentId={document.id}
           samplePage={samplePage}
@@ -85,7 +94,9 @@ export function SelectScreen({
             <TextInput value={language} onChange={(e) => setLanguage(e.target.value)} />
           </Field>
         </div>
-        {needsOcr && !convertModelId && <p className="status-error small">Selected pages include scanned pages — compare and pick a model above first.</p>}
+        {needsOcr && !convertModelId && (
+          <p className="status-error small">Selected pages include scanned pages, but no OCR model is installed — install one above.</p>
+        )}
         <button
           type="button"
           className="btn-primary"

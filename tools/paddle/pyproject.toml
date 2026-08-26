@@ -1,7 +1,7 @@
 [project]
 name = "bookforge-ocr-paddle"
 version = "0.1.0"
-description = "Persistent PaddleOCR-VL bridge used by Bookforge's OCR adapter (src/pdf/ocr.ts)."
+description = "Persistent PaddleOCR-VL bridge used by Bookforge's OCR adapter (tools/ocr-paddle.py)."
 requires-python = ">=3.9,<3.14"
 dependencies = [
     "paddlepaddle==3.2.1",

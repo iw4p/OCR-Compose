@@ -29,6 +29,13 @@ export default function App() {
   const [busy, setBusy] = useState<{ title: string; copy?: string } | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
 
+  // Comparison is a way to choose a model, never a step you owe the app: the
+  // first installed provider converts unless the operator picks another one.
+  const installed = models.filter((model) => model.installed);
+  const convertModel =
+    (convertModelId && installed.some((model) => model.id === convertModelId) ? convertModelId : installed[0]?.id) ??
+    null;
+
   useEffect(() => {
     api
       .listModels()
@@ -103,7 +110,7 @@ export default function App() {
     try {
       const result = await api.convertDocument(document.id, {
         pages: [...selectedPages],
-        modelId: convertModelId ?? undefined,
+        modelId: convertModel ?? undefined,
         ...meta,
       });
       setBook(result.book);
@@ -218,7 +225,7 @@ export default function App() {
             comparison={comparison}
             comparing={comparing}
             onRunCompare={handleCompare}
-            convertModelId={convertModelId}
+            convertModelId={convertModel}
             onChooseConvertModel={setConvertModelId}
             onConvert={handleConvert}
             converting={converting}

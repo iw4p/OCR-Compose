@@ -19,7 +19,7 @@ The UI is a client of Bookforge. It does not contain a second conversion pipelin
 8. Edit, reorder, insert, remove, and validate Book blocks.
 9. Export `book.json` or a reflowable EPUB.
 
-Every provider caches its comparison results through the same helper (`ocrCache`), so a compared page is reused during conversion instead of being recognized — or paid for — twice. An entry is addressed by the full identity of whatever produced it, the page image, and the languages: PaddleOCR-VL by its model version and the adapter's output contract, the OpenAI-compatible provider additionally by its model name and endpoint URL, so two servers or two models never share a result. Each provider keeps its own directory under `.bookforge-cache/`, and deleting one leaves the others alone.
+Every provider caches its comparison results through the same helper (`ocrCache`), so a compared page is reused during conversion instead of being recognized twice. An entry is addressed by the full identity of whatever produced it, the page image, and the languages — the model, its version, and the adapter's own output contract — so a result one provider wrote is never served to another. Each provider keeps its own directory under `.bookforge-cache/`, and deleting one leaves the others alone.
 
 ## Ownership boundaries
 
@@ -42,7 +42,20 @@ Every provider caches its comparison results through the same helper (`ocrCache`
 - model-specific output parsing
 - normalized positioned blocks over the JSONL protocol
 
-Python never creates EPUB structures. The UI never interprets Paddle internals.
+Python never creates EPUB structures. The UI never interprets a model's internals.
+
+## The two models
+
+| | OnnxTR 0.9 (default) | PaddleOCR-VL 1.6 |
+|---|---|---|
+| Runtime | `onnxtr[cpu]`: onnxruntime + opencv, no PyTorch | PaddlePaddle + `paddleocr[doc-parser]` |
+| Python | 3.11+ | 3.9–3.13 |
+| Weights | ~275 MB | ~1 GB, downloaded on first use |
+| Speed | ~0.2–0.6 s a page on a desktop CPU | slow on CPU; needs MLX or a GPU to be pleasant |
+| Reads | layout, reading order, tables | layout, tables, formulas, and a VLM that transcribes them |
+| Runs on | almost anything: onnxruntime dispatches SIMD at runtime | needs AVX, and realistically an accelerator |
+
+OnnxTR is first because it installs with one pip command and finishes a book on a laptop. PaddleOCR-VL stays as the higher-accuracy tier: its VLM reads formulas and messy tables that OnnxTR cannot.
 
 ## Provider extension point
 
@@ -61,36 +74,42 @@ type ModelStatus = {
   installed: boolean;
   source: "managed" | "external" | null;
   diskBytes: number;
-  endpoint?: { url: string; local: boolean };  // providers that call out instead of installing
 };
 ```
 
-`OcrEngine` returns ordered normalized blocks with text, a semantic label, and a normalized bounding box. A provider may use Python, a local HTTP process, or a remote service, but it must honor that same result contract. The Studio automatically lists and compares every registered provider.
+`OcrEngine` returns ordered normalized blocks with text, a semantic label, and a normalized bounding box. A provider owns how it loads and runs its model, but it must honor that same result contract. The Studio automatically lists and compares every registered provider.
 
-A provider with nothing on disk reports `diskBytes: 0`, `source: "external"` when its endpoint answers and `null` when it does not, and sets `endpoint` so the Studio can show where pages go. For such a provider `install()` installs nothing — it probes the endpoint and reports what it found — and `remove()` deletes nothing; the Studio only ever offers removal for `source: "managed"`.
+A runtime Bookforge installed itself reports `source: "managed"` and its size on disk; one the operator provided reports `source: "external"` and is never removable. The Studio only ever offers removal for `source: "managed"`.
 
-### OpenAI-compatible VLM provider
-
-`src/models/vlm.ts` is one adapter for the `/v1/chat/completions` vision API, which covers Ollama, LM Studio, vLLM, OpenRouter and hosted APIs without a line of code per model. It is configured entirely by environment, in the same spirit as `BOOKFORGE_PADDLEOCR_*`:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `BOOKFORGE_VLM_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL |
-| `BOOKFORGE_VLM_MODEL` | `qwen2.5vl` | model name the endpoint serves |
-| `BOOKFORGE_VLM_API_KEY` | *(none)* | sent as `Authorization: Bearer …` |
-| `BOOKFORGE_VLM_TIMEOUT_MS` | `180000` | per-page request timeout |
-
-The page PNG is sent as a base64 `image_url` data URI with a prompt asking for labelled layout blocks and normalized corner boxes, requested as `response_format: {"type": "json_object"}` and retried once without that field for servers that reject it.
-
-A general vision model is not a document parser, so the reply is treated as untrusted text:
-
-- JSON is recovered from the whole reply, from the outermost array or object inside prose or code fences, or from one object per line.
-- Labels are collapsed to the vocabulary `ocrBlocksToBookBlocks` already switches on; an unrecognized label becomes prose rather than an invented heading.
-- Boxes are accepted as corner arrays, point pairs, or `x`/`y`/`w`/`h` objects, and rescaled from unit fractions, percentages, the 0–1000 grid many VLMs are trained on, or page pixels (read from the PNG header) — whichever scale fits the page most tightly.
-- A block whose box is missing or nonsensical never becomes a zero-size *region*: text keeps its place in reading order with an inert empty box, and a picture nobody can locate is dropped rather than cropped from invented coordinates.
-- Individually malformed entries are skipped; only a reply with no structure at all fails the page, and it fails naming the model, the endpoint, and the start of what came back.
+### Label normalization
 
 Model-specific labels are normalized before they enter `ocrBlocksToBookBlocks`. Source-specific interpretation happens first; shared semantic processing happens second; the strict Book contract remains the final boundary.
+
+OnnxTR is the worked example. It reports DocLayNet's eleven classes, and two of them are traps: the mapper matches furniture with `/header|footer|…/`, so a raw `Section-header` would be hidden as a running head, and `Picture` matches nothing at all, so it would be dropped as an empty block. `onnxtrLabel` (`src/pdf/ocr.ts`) maps every class explicitly:
+
+| OnnxTR class | mapper label | contract block |
+|---|---|---|
+| `Title` | `doc_title` | `heading` level 1 |
+| `Section-header` | `paragraph_title` | `heading` level 2 |
+| `Text` | `text` | `text` |
+| `List-item` | `list` | one `list`, consecutive items merged |
+| `Table` | `table` | `table` with parsed `rows`, or `role: "table-source"` |
+| `Caption` | `caption` | `role: "caption"`, bound to a touching figure |
+| `Footnote` | `footnote` | `role: "footnote-source"` |
+| `Page-header` | `header` / `number` | `role: "running-header"` / `"page-number"` |
+| `Page-footer` | `footer` / `number` | `role: "running-footer"` / `"page-number"` |
+| `Picture` | `image` | `image`, cropped from the page render |
+| `Formula` | `image` | `image`, cropped from the page render |
+
+A running head that is nothing but a numeral becomes `number`, so it is demoted as a page number rather than a title. `Formula` becomes a picture on purpose: OnnxTR recognizes text, not math, so its characters would be a plausible-looking lie in a `tex` field — the pixels are the only faithful record (§3.3). Anything unrecognized becomes prose, never an invented heading.
+
+Tables take the same route as Paddle's rather than a second one: `tools/ocr-onnxtr.py` reports the cell grid, `onnxtrTableHtml` serializes it to `<table>` markup, and the existing `htmlTable` parser turns that into `rows`. A merged cell keeps its `colspan`/`rowspan`, so the parser refuses the grid and the block degrades to `table-source` instead of being silently reshaped. OnnxTR removes table words from its text blocks, so nothing is counted twice.
+
+Geometry needs no conversion at all: OnnxTR's `geometry` is already `((xmin,ymin),(xmax,ymax))` relative to the page with a top-left origin, so the provider clamps it to the page and subtracts. Nothing is rescaled and there is no resize grid to get wrong.
+
+### Known limitation: OnnxTR flattens typography
+
+Neither the default recognizer nor the multilingual one has curly quotes, em or en dashes, or ellipses in its vocabulary (`" " ' ' — – …`). Books are full of them, so expect ASCII substitutes and, where the recognizer guesses, visible junk: `"` may come back as `C6`, `66` or `33`. This is a property of the weights, not a bug in the adapter, and it is deliberately not patched here — a separate `typography` pass belongs after recognition, where it can see whole sentences. PaddleOCR-VL's VLM does not have this problem.
 
 ### Lifecycle: get it, run it, stop it, remove it
 
@@ -108,8 +127,10 @@ Comparison still runs models one at a time, so ordinary machines hold at most on
 Installation and removal are separate concerns from the model weights:
 
 - The **runtime** lives in `.bookforge-models/<id>/`, is created by `install()`, measured by `status()`, and is the *only* tree `remove()` may delete. `managedModelDir(id)` resolves that path and throws unless the result is strictly inside `.bookforge-models/`, so no id, traversal or symlink can escape it.
-- The **weights** are downloaded by the model itself into the shared PaddleX/HuggingFace cache on first inference. They are outside Bookforge's control and are never deleted; `remove()` says so in its message.
-- A runtime found through `BOOKFORGE_PADDLEOCR_PYTHON` or a hand-made `.venv-paddleocr/` reports `source: "external"`. External runtimes are usable but never removable, and the Studio hides the remove action for them.
+- The **weights** are downloaded by the model itself on first inference — into `ONNXTR_CACHE_DIR` for OnnxTR, the shared PaddleX/HuggingFace cache for Paddle. They are outside Bookforge's control and are never deleted; `remove()` says so in its message.
+- A runtime found through `BOOKFORGE_ONNXTR_PYTHON`, `BOOKFORGE_PADDLEOCR_PYTHON` or a hand-made `.venv-paddleocr/` reports `source: "external"`. External runtimes are usable but never removable, and the Studio hides the remove action for them.
+
+Both installers build an isolated venv under `.bookforge-models/<id>/venv/` from `BOOKFORGE_PYTHON` (default `python3`), and refuse a base interpreter too old for the model — OnnxTR needs 3.11. On Intel Macs the OnnxTR installer pins `onnxruntime==1.23.2`, because onnxruntime publishes arm64-only macOS wheels from 1.24.1 onwards. The helper asks for `CPUExecutionProvider` explicitly: it runs every one of these graphs, where CoreML miscompiles `parseq`.
 
 ## Local state
 
@@ -121,16 +142,15 @@ All three directories are ignored.
 
 ## Where pages go
 
-The Studio itself never uploads anything: it has no telemetry, no account, and no hosted backend. Every model it can run is one the operator configured, and only two kinds exist:
+Nowhere. Every provider runs its model on this machine, so the book never leaves it: no telemetry, no account, no hosted backend, and no provider that sends a page image anywhere. The source file, the rendered pages, `book.json` and the EPUB all stay on disk under `.bookforge-studio/`, `.bookforge-cache/` and `.bookforge-models/`.
 
-- **Local providers** — PaddleOCR-VL, or an OpenAI-compatible endpoint on loopback, a `.local` name, or a private LAN address. Nothing leaves the machine or its network.
-- **Remote endpoints** — an OpenAI-compatible provider pointed at a hosted API. Then the rendered page images of every page you compare or convert are uploaded to that third party, under their terms and retention policy. Nothing else is: the source file, `book.json` and the EPUB stay local.
+The only traffic Bookforge ever originates is downloading a model: `install()` fetches Python packages from PyPI, and the first inference downloads the model's own weights. Both are downloads. Neither carries any part of a book.
 
-That distinction is not left to the operator's memory. `ModelStatus.endpoint` reports the URL and whether it is local; the model card shows a `local endpoint` or `remote endpoint` chip, prints the URL, and a remote endpoint carries a standing warning naming the host that receives the pages. `install()` — "Check endpoint" — repeats it in its result. The default `BOOKFORGE_VLM_URL` is a local Ollama, so the zero-config case is local.
+Keeping that true is a rule for new providers, not an accident of the current set: a provider that would send page images to a third party does not belong in this registry.
 
 ## Next provider checklist
 
-1. Add an adapter: a Python helper on the persistent JSONL protocol, or an HTTP client like `src/models/vlm.ts`.
+1. Add an adapter: a Python helper on the persistent JSONL protocol, like `tools/ocr-paddle.py`.
 2. Normalize its labels and coordinates to `OcrBlock`.
 3. Add one provider object to the registry, including detection, isolated installation, disk reporting and removal.
 4. Add mapper fixtures for headings, paragraphs, furniture, lists, tables and formulas.

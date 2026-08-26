@@ -80,13 +80,15 @@ PDF:
   line-to-paragraph unwrapping with evidence-based dehyphenation, cross-page
   merging (recording the exact break offset for the EPUB page-list), drop-cap
   absorption, font-size outline detection.
-- **`ocr-adapter`** — for scanned books: the complete PaddleOCR-VL 1.6
-  document pipeline (layout analysis + VLM). Its semantic paragraphs,
-  headings, tables and formulas map directly into contract blocks; they are
-  never degraded into synthetic PDF lines. Illustrations are cropped out of
-  the page render and written as assets, with adjacent captions bound to
-  them, and its HTML tables are parsed into real `rows`. Results are cached,
-  so re-runs are instant.
+- **`ocr-adapter`** — for scanned books: a document model's own layout
+  analysis. Its semantic paragraphs, headings, tables and formulas map
+  directly into contract blocks; they are never degraded into synthetic PDF
+  lines. Illustrations are cropped out of the page render and written as
+  assets, with adjacent captions bound to them, and tables are parsed into
+  real `rows`. Results are cached, so re-runs are instant. Two models are
+  wired up: **OnnxTR 0.9** (the default — pure ONNX, no PyTorch, one pip
+  command, ~275 MB of weights) and **PaddleOCR-VL 1.6** (heavier, but its
+  VLM reads formulas and messy tables).
 
 Not built yet: math structure recognition and tables too irregular to parse
 (`colspan`/`rowspan`) — both degrade to images by design — TOC cross-checking
@@ -139,14 +141,41 @@ The CLI has three commands (via `npx tsx src/cli.ts …` or `npm run build` then
 | `bookforge pack book/ out.epub` | book folder → EPUB (refuses invalid input) |
 | `bookforge studio [--port 4173]` | launch the local visual OCR and EPUB workbench |
 
-`--ocr` uses [PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6).
-Its dependencies are pinned in [tools/pyproject.toml](tools/pyproject.toml)
-(Python 3.9–3.13, PaddlePaddle 3.2.1, `paddleocr[doc-parser]` 3.6.0+). Install
-it in a dedicated virtual environment:
+### OCR models
+
+Both models run entirely on your machine; nothing is ever uploaded. The Studio
+installs either one into `.bookforge-models/<id>/` for you — the commands below
+are the manual equivalent.
+
+**[OnnxTR 0.9](https://github.com/felixdittrich92/OnnxTR)** is the default and
+what `--ocr` uses: a docTR fork shipping pure-ONNX weights, so there is no
+PyTorch, no compiler and no AVX cliff. Its pins live in
+[tools/onnxtr/pyproject.toml](tools/onnxtr/pyproject.toml) (Python 3.11+,
+`onnxtr[cpu]` 0.9.0):
+
+```sh
+uv venv --python 3.13 .venv-onnxtr
+uv pip install --python .venv-onnxtr/bin/python -r tools/onnxtr/pyproject.toml
+export BOOKFORGE_ONNXTR_PYTHON="$PWD/.venv-onnxtr/bin/python"
+```
+
+The first run downloads ~275 MB of weights into `ONNXTR_CACHE_DIR`: detection
+`db_resnet50`, recognition `parseq`, layout `lw_detr_s`, tables
+`tablecenternet`. A book in a language the Latin-only default vocabulary does
+not cover switches to multilingual recognition weights automatically, following
+`--lang`. Its recognizers have no curly quotes, dashes or ellipses in their
+vocabulary, so expect ASCII substitutes — see
+[docs/STUDIO.md](docs/STUDIO.md). On Intel Macs, pin `onnxruntime==1.23.2`
+(the `intel-mac` extra): newer releases publish arm64-only macOS wheels.
+
+**[PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6)** is
+the heavier, higher-accuracy tier, offered in the Studio. Its dependencies are
+pinned in [tools/paddle/pyproject.toml](tools/paddle/pyproject.toml) (Python
+3.9–3.13, PaddlePaddle 3.2.1, `paddleocr[doc-parser]` 3.6.0+):
 
 ```sh
 uv venv --python 3.13 .venv-paddleocr
-uv pip install --python .venv-paddleocr/bin/python -r tools/pyproject.toml
+uv pip install --python .venv-paddleocr/bin/python -r tools/paddle/pyproject.toml
 export BOOKFORGE_PADDLEOCR_PYTHON="$PWD/.venv-paddleocr/bin/python"
 ```
 
@@ -154,24 +183,25 @@ On Apple Silicon the official local route uses `cpu`; set
 `BOOKFORGE_PADDLEOCR_DEVICE=cpu`. GPU hosts can select a Paddle device such as
 `gpu:0`. Direct Apple CPU inference is very slow. Paddle's supported accelerated
 Apple path keeps layout analysis local and serves the VLM with MLX-VLM (the
-`mlx` extra in `tools/pyproject.toml`):
+`mlx` extra):
 
 ```sh
-uv pip install --python .venv-paddleocr/bin/python -r tools/pyproject.toml --extra mlx
+uv pip install --python .venv-paddleocr/bin/python -r tools/paddle/pyproject.toml --extra mlx
 .venv-paddleocr/bin/mlx_vlm.server --port 8111
 export BOOKFORGE_PADDLEOCR_VL_BACKEND=mlx-vlm-server
 export BOOKFORGE_PADDLEOCR_VL_SERVER_URL=http://localhost:8111/
 export BOOKFORGE_PADDLEOCR_VL_MODEL_NAME=PaddlePaddle/PaddleOCR-VL-1.6
 ```
 
-The first OCR run downloads the official models. The typical PDF→EPUB flow is
-`bookforge pdf` … inspect/fix `book.json` … `bookforge pack`.
+The typical PDF→EPUB flow is `bookforge pdf` … inspect/fix `book.json` …
+`bookforge pack`.
 
 ## Repo layout
 
 ```
 DESIGN.md          the why: evidence, architecture, roadmap
-tools/             ocr-paddle.py — persistent PaddleOCR-VL 1.6 bridge
+tools/             persistent OCR bridges: ocr-onnxtr.py, ocr-paddle.py,
+                   one pinned Python environment each
 src/
   contract.ts      schema, validator, block walker
   inline.ts        the inline dialect: parse + render
@@ -181,7 +211,7 @@ src/
   pdf/textlayer.ts per-page verdict: which pipeline a page needs
   pdf/extract.ts   mupdf wrapper: runs, lines, images, bookmarks
   pdf/passes.ts    classify / unwrap / outline
-  pdf/ocr.ts       OCR adapter interface + PaddleOCR-VL 1.6 engine
+  pdf/ocr.ts       OCR adapter interface, block mapper, OnnxTR + Paddle engines
   pdf/pdf.ts       the front-end orchestrator
   models/          model registry, installation and provider construction
   studio/server.ts local Studio API and static app server

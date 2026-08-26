@@ -2,8 +2,7 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { paddleEngine, type OcrEngine } from "../pdf/ocr.js";
-import { vlmProvider } from "./vlm.js";
+import { onnxtrEngine, paddleEngine, type OcrEngine } from "../pdf/ocr.js";
 
 export type ModelCapability = "layout" | "multilingual" | "tables" | "formulas";
 
@@ -15,9 +14,6 @@ export type ModelStatus = {
   source: ModelSource | null;
   /** Approximate bytes under `.bookforge-models/<id>/`; 0 for external runtimes. */
   diskBytes: number;
-  /** Set by a provider that calls out instead of installing: where pages go,
-   *  and whether that is still this machine. The Studio warns when it is not. */
-  endpoint?: { url: string; local: boolean };
 };
 
 export type ModelInfo = ModelStatus & {
@@ -26,7 +22,6 @@ export type ModelInfo = ModelStatus & {
   version: string;
   description: string;
   capabilities: ModelCapability[];
-  runtime: "python" | "http";
   installLabel: string;
   firstRunNote: string;
   /** True while a warm engine is held in memory for this model. */
@@ -34,6 +29,7 @@ export type ModelInfo = ModelStatus & {
 };
 
 const PADDLE_ID = "paddleocr-vl-1.6";
+const ONNXTR_ID = "onnxtr-0.9";
 
 /**
  * The only directory tree Bookforge ever deletes. Resolved and re-checked on
@@ -46,11 +42,9 @@ export const managedModelDir = (id: string) => {
   if (dir === root || !dir.startsWith(root + sep)) throw new Error(`refusing to manage ${dir}`);
   return dir;
 };
-const managedRoot = () => join(managedModelDir(PADDLE_ID), "venv");
-const managedPython = () =>
-  process.platform === "win32"
-    ? join(managedRoot(), "Scripts", "python.exe")
-    : join(managedRoot(), "bin", "python");
+const venvDir = (id: string) => join(managedModelDir(id), "venv");
+const venvPython = (id: string) =>
+  process.platform === "win32" ? join(venvDir(id), "Scripts", "python.exe") : join(venvDir(id), "bin", "python");
 
 /** Recursive apparent size. Symlinks are counted as neither file nor directory. */
 const dirBytes = async (dir: string): Promise<number> => {
@@ -73,15 +67,20 @@ const executable = async (path: string) => {
   }
 };
 
-export async function paddlePythonPath(): Promise<string | null> {
-  const candidates = [
-    process.env.BOOKFORGE_PADDLEOCR_PYTHON,
-    managedPython(),
-    join(process.cwd(), ".venv-paddleocr", process.platform === "win32" ? "Scripts/python.exe" : "bin/python3"),
-  ].filter((value): value is string => Boolean(value));
-  for (const candidate of candidates) if (await executable(candidate)) return candidate;
+/** The first usable interpreter: the operator's, then ours. `null` if none is. */
+const pythonPath = async (...candidates: (string | undefined)[]): Promise<string | null> => {
+  for (const candidate of candidates) if (candidate && (await executable(candidate))) return candidate;
   return null;
-}
+};
+
+const paddlePython = () =>
+  pythonPath(
+    process.env.BOOKFORGE_PADDLEOCR_PYTHON,
+    venvPython(PADDLE_ID),
+    join(process.cwd(), ".venv-paddleocr", process.platform === "win32" ? "Scripts/python.exe" : "bin/python3")
+  );
+
+const onnxtrPython = () => pythonPath(process.env.BOOKFORGE_ONNXTR_PYTHON, venvPython(ONNXTR_ID));
 
 const run = async (command: string, args: string[]): Promise<string> =>
   await new Promise((resolve, reject) => {
@@ -97,6 +96,40 @@ const run = async (command: string, args: string[]): Promise<string> =>
       else reject(new Error(`${command} exited with code ${code ?? "unknown"}\n${output}`));
     });
   });
+
+/** Ours or the operator's, and what our own tree costs on disk. */
+const runtimeStatus = async (id: string, python: string | null): Promise<ModelStatus> => {
+  const managed = managedModelDir(id);
+  return {
+    installed: python !== null,
+    source: python === null ? null : resolve(python).startsWith(managed + sep) ? "managed" : "external",
+    diskBytes: await dirBytes(managed),
+  };
+};
+
+/** An isolated venv under `.bookforge-models/<id>/`, never a shared one. */
+const createVenv = async (id: string, minimumMinor = 0): Promise<string> => {
+  const base = process.env.BOOKFORGE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+  const version = (await run(base, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"])).trim();
+  const [major, minor] = version.split(/\s+/).map(Number);
+  if (major !== 3 || minor! < minimumMinor)
+    throw new Error(
+      `${base} is Python ${major}.${minor}; this model needs 3.${minimumMinor} or newer. ` +
+        "Set BOOKFORGE_PYTHON to one that is."
+    );
+  await mkdir(managedModelDir(id), { recursive: true });
+  await run(base, ["-m", "venv", venvDir(id)]);
+  const python = venvPython(id);
+  await run(python, ["-m", "pip", "install", "--upgrade", "pip"]);
+  return python;
+};
+
+const removeRuntime = async (id: string, name: string, weightsHome: string): Promise<string> => {
+  const dir = managedModelDir(id);
+  if (!(await stat(dir).catch(() => null))) return `No managed ${name} runtime on disk.`;
+  await rm(dir, { recursive: true, force: true });
+  return `Removed the managed ${name} runtime. Downloaded weights stay in ${weightsHome}.`;
+};
 
 export type ModelProvider = {
   info: Omit<ModelInfo, keyof ModelStatus | "loaded">;
@@ -114,46 +147,65 @@ const paddleProvider: ModelProvider = {
     version: "1.6",
     description: "Document layout, multilingual OCR, tables and formulas.",
     capabilities: ["layout", "multilingual", "tables", "formulas"],
-    runtime: "python",
     installLabel: "Install runtime",
     firstRunNote: "The first comparison may download the official model weights.",
   },
   async status() {
-    const python = await paddlePythonPath();
-    const managed = managedModelDir(PADDLE_ID);
-    return {
-      installed: python !== null,
-      source: python === null ? null : resolve(python).startsWith(managed + sep) ? "managed" : "external",
-      diskBytes: await dirBytes(managed),
-    };
+    return await runtimeStatus(PADDLE_ID, await paddlePython());
   },
   async create() {
-    const pythonPath = await paddlePythonPath();
-    if (!pythonPath)
-      throw new Error("PaddleOCR-VL is not installed. Install it from the Models panel first.");
-    return paddleEngine({ pythonPath });
+    const python = await paddlePython();
+    if (!python) throw new Error("PaddleOCR-VL is not installed. Install it from the Models panel first.");
+    return paddleEngine({ pythonPath: python });
   },
   async install() {
-    if (await paddlePythonPath()) return "PaddleOCR-VL is already installed.";
-    const basePython = process.env.BOOKFORGE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
-    await mkdir(managedModelDir(PADDLE_ID), { recursive: true });
-    await run(basePython, ["-m", "venv", managedRoot()]);
-    const python = managedPython();
-    await run(python, ["-m", "pip", "install", "--upgrade", "pip"]);
+    if (await paddlePython()) return "PaddleOCR-VL is already installed.";
+    const python = await createVenv(PADDLE_ID);
     await run(python, ["-m", "pip", "install", "paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.6.0"]);
     return "PaddleOCR-VL runtime installed. Official model weights download automatically on first use.";
   },
   async remove() {
-    const dir = managedModelDir(PADDLE_ID);
-    if (!(await stat(dir).catch(() => null))) return "No managed PaddleOCR-VL runtime on disk.";
-    await rm(dir, { recursive: true, force: true });
-    return "Removed the managed PaddleOCR-VL runtime. Downloaded weights stay in the shared PaddleX/HuggingFace cache.";
+    return await removeRuntime(PADDLE_ID, "PaddleOCR-VL", "the shared PaddleX/HuggingFace cache");
+  },
+};
+
+const onnxtrProvider: ModelProvider = {
+  info: {
+    id: ONNXTR_ID,
+    name: "OnnxTR",
+    version: "0.9",
+    description: "Pure ONNX, no PyTorch: layout, reading order and table structure on any CPU.",
+    // no formulas: OnnxTR recognizes text, not math, so a formula is kept as a picture
+    capabilities: ["layout", "multilingual", "tables"],
+    installLabel: "Install runtime",
+    firstRunNote: "The first comparison downloads about 275 MB of ONNX weights.",
+  },
+  async status() {
+    return await runtimeStatus(ONNXTR_ID, await onnxtrPython());
+  },
+  async create() {
+    const python = await onnxtrPython();
+    if (!python) throw new Error("OnnxTR is not installed. Install it from the Models panel first.");
+    return onnxtrEngine({ pythonPath: python });
+  },
+  async install() {
+    if (await onnxtrPython()) return "OnnxTR is already installed.";
+    const python = await createVenv(ONNXTR_ID, 11);
+    // Intel Macs: onnxruntime ships arm64-only wheels from 1.24.1 onwards.
+    const intelMac = process.platform === "darwin" && process.arch === "x64";
+    if (intelMac) await run(python, ["-m", "pip", "install", "onnxruntime==1.23.2"]);
+    await run(python, ["-m", "pip", "install", "onnxtr[cpu]==0.9.0"]);
+    return "OnnxTR runtime installed. The ONNX weights download automatically on first use.";
+  },
+  async remove() {
+    return await removeRuntime(ONNXTR_ID, "OnnxTR", "ONNXTR_CACHE_DIR");
   },
 };
 
 // One provider object is the entire extension point for future models. The
-// studio and document pipeline never switch on model-specific behavior.
-const providers: ModelProvider[] = [paddleProvider];
+// studio and document pipeline never switch on model-specific behavior. OnnxTR
+// is first because it is the one that runs everywhere.
+const providers: ModelProvider[] = [onnxtrProvider, paddleProvider];
 const provider = (id: string) => {
   const found = providers.find((candidate) => candidate.info.id === id);
   if (!found) throw new Error(`unknown OCR model: ${id}`);
@@ -164,8 +216,6 @@ const provider = (id: string) => {
 export function registerProvider(item: ModelProvider): void {
   providers.push(item);
 }
-
-registerProvider(vlmProvider);
 
 // Keep-alive, like `ollama`: a model stays warm between requests and unloads
 // itself once idle, so a comparison and the conversion that follows it pay the

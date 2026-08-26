@@ -32,14 +32,15 @@ export async function pdfToBookDir(
   opts: { title?: string; author?: string; language?: string; pages?: number[]; ocr?: boolean } = {}
 ): Promise<{ warnings: string[]; counts: Record<string, number> }> {
   const { pdfToBook } = await import("./pdf/pdf.js");
-  const { paddleEngine } = await import("./pdf/ocr.js");
+  // the default provider; the Studio is where another one is chosen
+  const { onnxtrEngine } = await import("./pdf/ocr.js");
   const { book, assets, warnings, report } = await pdfToBook(new Uint8Array(await readFile(pdfPath)), {
     ...(opts.title !== undefined && { title: opts.title }),
     ...(opts.author !== undefined && { author: opts.author }),
     ...(opts.language !== undefined && { language: opts.language }),
     ...(opts.pages !== undefined && { pages: opts.pages }),
     ...(opts.ocr && {
-      ocr: paddleEngine(),
+      ocr: onnxtrEngine(),
       onProgress: (done: number, total: number) => {
         if (done % 10 === 0 || done === total) console.error(`ocr: ${done}/${total} pages`);
       },
