@@ -26,7 +26,7 @@ production.
 ## Where things live
 
 Read [README.md](README.md#repo-layout) for the layout and
-[DESIGN.md](DESIGN.md) for *why* it's shaped this way before changing the
+[docs/DESIGN.md](docs/DESIGN.md) for *why* it's shaped this way before changing the
 contract (`src/contract.ts`) or the pipeline architecture — the three
 invariants in DESIGN.md §3.2 (page-as-metadata, role-not-position,
 passes-never-lose-information) are load-bearing and any change that violates

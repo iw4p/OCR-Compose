@@ -17,14 +17,21 @@ Drop a PDF, read one page to see the quality and learn how fast your machine
 is, then convert and download the EPUB. Everything — the model, the weights,
 the book — stays on your machine; nothing is ever uploaded.
 
+![The Studio reading one scanned page of Alice's Adventures in Wonderland: the
+regions the model found drawn over the page, the blocks they become, and the
+measured cost per page](docs/studio.png)
+
+*One page of a scanned* Alice *— the regions the model found, the blocks they
+become, and what the whole selection will cost on this machine.*
+
 "Real" means reflowable text with figures, tables, footnotes and
 cross-references intact and correctly anchored — not a page-image container,
 not a wall of undifferentiated paragraphs. Existing tools either reproduce the
 PDF's fixed layout (useless on a 6" screen) or squeeze everything through
 Markdown and lose exactly the things that make a book a book.
 
-The full reasoning, evidence and roadmap live in [DESIGN.md](DESIGN.md). This
-file is the short version: what works today and how the pieces fit.
+The full reasoning, evidence and roadmap live in
+[docs/DESIGN.md](docs/DESIGN.md). This file is the short version.
 
 ## How it works
 
@@ -60,49 +67,6 @@ them: a table with parsed `rows` becomes a real `<table>`, one without becomes
 an image; a formula with `tex` becomes MathML (the TeX rides along losslessly
 inside it), one without becomes an image. When better recognizers land, output
 improves and no schema or back-end code changes.
-
-## What works today
-
-The "back half" — everything from the contract to EPUB and back:
-
-- **`contract`** ([src/contract.ts](src/contract.ts)) — the schema and
-  validator. Catches malformed shapes, unknown fields, dangling
-  cross-references, missing footnotes, duplicate ids, dialect syntax errors
-  (with the exact path), and annotation offsets that drifted out of sync.
-- **inline dialect** ([src/inline.ts](src/inline.ts)) — parser and renderer
-  for the text markup, round-trip exact: `render(parse(s)) === s`.
-- **`epub3` writer** ([src/epub/write.ts](src/epub/write.ts)) — contract →
-  EPUB3: navigation document, semantic footnotes (`epub:type="noteref"` /
-  `"footnote"`), figures with captions, MathML, and a page-list wired to
-  pagebreak markers — including markers placed mid-paragraph at the exact
-  character where the page turned.
-- **`epub-read`** ([src/epub/read.ts](src/epub/read.ts)) — the inverse:
-  EPUB → contract, reconstructing blocks, dialect text, footnotes, and page
-  provenance from the markup.
-
-A book run through write → read comes back **identical**, byte for byte of
-JSON — that round-trip is the core of the test suite.
-
-And the **PDF front end** ([src/pdf/](src/pdf/)), covering all three kinds of
-PDF:
-
-- **`textlayer`** — the per-page routing verdict (`native` / `scanned` /
-  `no-text`) from image coverage and a language-agnostic garble score. A
-  double-layer PDF is `scanned`: its hidden OCR text is never trusted.
-- **`extract`** — text runs with real font names (italics are read from the
-  font name, never guessed from pixels), images, bookmarks.
-- **passes** — running header/footer removal with printed-page capture,
-  line-to-paragraph unwrapping with evidence-based dehyphenation, cross-page
-  merging (recording the exact break offset for the EPUB page-list), drop-cap
-  absorption, font-size outline detection.
-- **`ocr-adapter`** — for scanned books: a document model's own layout
-  analysis. Its semantic paragraphs, headings, tables and formulas map
-  directly into contract blocks; they are never degraded into synthetic PDF
-  lines. Illustrations are cropped out of the page render and written as
-  assets, with adjacent captions bound to them, and tables are parsed into
-  real `rows`. Results are cached, so re-runs are instant. The model is
-  **PaddleOCR-VL 1.6**: its VLM reads formulas and messy tables as well as
-  ordinary prose.
 
 Not built yet: math structure recognition and tables too irregular to parse
 (`colspan`/`rowspan`) — both degrade to images by design — TOC cross-checking
@@ -191,7 +155,7 @@ The typical PDF→EPUB flow is `ocr-compose pdf` … inspect/fix `book.json` …
 ## Repo layout
 
 ```
-DESIGN.md          the why: evidence, architecture, roadmap
+docs/DESIGN.md     the why: evidence, architecture, roadmap
 tools/             the persistent OCR bridge: ocr-paddle.py and its pinned
                    Python environment
 src/

@@ -8,6 +8,9 @@ It is a client of OCR Compose. It contains no second conversion pipeline.
 
 ## The flow
 
+![The whole Studio: the model card, a scanned Alice with its page map, one page
+read for real, and the convert step carrying the measured estimate](studio-full.png)
+
 1. **Model.** PaddleOCR-VL, installed into an isolated venv under
    `.ocr-compose-models/`. Before installing, the card states the download size;
    during installation it streams the installer's own output; afterwards it
