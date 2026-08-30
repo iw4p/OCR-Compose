@@ -1,6 +1,21 @@
-# Bookforge
+# OCR Compose
 
-**Make a real EPUB from a PDF.**
+**Make a real EPUB from a PDF — including scanned ones.**
+
+[![CI](https://github.com/iw4p/OCR-Compose/actions/workflows/ci.yml/badge.svg)](https://github.com/iw4p/OCR-Compose/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg)](package.json)
+
+```sh
+git clone https://github.com/iw4p/OCR-Compose.git
+cd OCR-Compose
+npm install
+npm run studio          # then open the printed local URL
+```
+
+Drop a PDF, read one page to see the quality and learn how fast your machine
+is, then convert and download the EPUB. Everything — the model, the weights,
+the book — stays on your machine; nothing is ever uploaded.
 
 "Real" means reflowable text with figures, tables, footnotes and
 cross-references intact and correctly anchored — not a page-image container,
@@ -85,10 +100,9 @@ PDF:
   directly into contract blocks; they are never degraded into synthetic PDF
   lines. Illustrations are cropped out of the page render and written as
   assets, with adjacent captions bound to them, and tables are parsed into
-  real `rows`. Results are cached, so re-runs are instant. Two models are
-  wired up: **OnnxTR 0.9** (the default — pure ONNX, no PyTorch, one pip
-  command, ~275 MB of weights) and **PaddleOCR-VL 1.6** (heavier, but its
-  VLM reads formulas and messy tables).
+  real `rows`. Results are cached, so re-runs are instant. The model is
+  **PaddleOCR-VL 1.6**: its VLM reads formulas and messy tables as well as
+  ordinary prose.
 
 Not built yet: math structure recognition and tables too irregular to parse
 (`colspan`/`rowspan`) — both degrade to images by design — TOC cross-checking
@@ -97,14 +111,17 @@ beyond embedded images on the native path.
 
 ## Using it
 
-```
+```sh
 npm install
 npm test
 ```
 
-### Bookforge Studio
+Node 22 or newer. The core library, the CLI and the EPUB path need nothing
+else — no Python, no models, no GPU. Only scanned PDFs do.
 
-The local Studio is the visual workflow for OCR operators and EPUB editors:
+### OCR Compose Studio
+
+The local Studio is the whole PDF → EPUB workflow in one page:
 
 ```sh
 npm run studio
@@ -112,75 +129,50 @@ npm run studio
 
 Open the printed local URL, then:
 
-1. Drop a PDF or EPUB.
-2. Select the pages that belong in the output.
-3. Run one representative page through every installed OCR model.
-4. Compare timing, positioned regions and semantic contract blocks.
-5. Choose a model and convert the selected pages.
-6. Reorder, add, remove and edit blocks; validate; export JSON or EPUB.
+1. Install PaddleOCR-VL, if it is not already there. The card states the
+   download size before you commit to it and streams the installer's output.
+2. Drop a PDF. Every page is classified as native text, scanned or blank, and
+   you pick the pages that belong in the output.
+3. Read one page for real. You see the recognized regions and the blocks they
+   become, and the page's measured duration turns into a time estimate for the
+   whole selection on *this* machine.
+4. Convert, watching real per-page progress, then download the EPUB or
+   `book.json`.
 
 The app runs locally because model environments, model weights and source
-books should remain on the user's machine. Uploaded working copies live under
-`.bookforge-studio/`, which is disposable and ignored by version control.
+books should remain on the user's machine. Nothing is written outside
+`.ocr-compose-models/` (the runtime) and `.ocr-compose-cache/` (recognized pages);
+the PDF itself is held in memory for the session only.
 
-The model registry is intentionally provider-shaped. Each provider owns model
-loading and inference, but returns ordered, normalized OCR blocks. The core
-owns page selection, comparison, caching, the Book contract and EPUB output.
-Adding a model therefore does not add a second document pipeline.
-The complete boundary and provider checklist are in
-[docs/STUDIO.md](docs/STUDIO.md).
-
-The CLI has three commands (via `npx tsx src/cli.ts …` or `npm run build` then
+The CLI (via `npx tsx src/cli.ts …` or `npm run build` then
 `node dist/cli.js …`):
 
 | Command | Does |
 |---|---|
-| `bookforge pdf in.pdf book/ [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]` | PDF → editable `book.json` + `assets/` |
-| `bookforge unpack in.epub book/` | EPUB → editable `book.json` + `assets/` |
-| `bookforge validate book/` | check a book folder, print issues with paths |
-| `bookforge pack book/ out.epub` | book folder → EPUB (refuses invalid input) |
-| `bookforge studio [--port 4173]` | launch the local visual OCR and EPUB workbench |
+| `ocr-compose pdf in.pdf book/ [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]` | PDF → editable `book.json` + `assets/` |
+| `ocr-compose unpack in.epub book/` | EPUB → editable `book.json` + `assets/` |
+| `ocr-compose validate book/` | check a book folder, print issues with paths |
+| `ocr-compose pack book/ out.epub` | book folder → EPUB (refuses invalid input) |
+| `ocr-compose studio [--port 4173]` | launch the local Studio: drop → test → convert |
 
-### OCR models
+### The OCR model
 
-Both models run entirely on your machine; nothing is ever uploaded. The Studio
-installs either one into `.bookforge-models/<id>/` for you — the commands below
-are the manual equivalent.
-
-**[OnnxTR 0.9](https://github.com/felixdittrich92/OnnxTR)** is the default and
-what `--ocr` uses: a docTR fork shipping pure-ONNX weights, so there is no
-PyTorch, no compiler and no AVX cliff. Its pins live in
-[tools/onnxtr/pyproject.toml](tools/onnxtr/pyproject.toml) (Python 3.11+,
-`onnxtr[cpu]` 0.9.0):
-
-```sh
-uv venv --python 3.13 .venv-onnxtr
-uv pip install --python .venv-onnxtr/bin/python -r tools/onnxtr/pyproject.toml
-export BOOKFORGE_ONNXTR_PYTHON="$PWD/.venv-onnxtr/bin/python"
-```
-
-The first run downloads ~275 MB of weights into `ONNXTR_CACHE_DIR`: detection
-`db_resnet50`, recognition `parseq`, layout `lw_detr_s`, tables
-`tablecenternet`. A book in a language the Latin-only default vocabulary does
-not cover switches to multilingual recognition weights automatically, following
-`--lang`. Its recognizers have no curly quotes, dashes or ellipses in their
-vocabulary, so expect ASCII substitutes — see
-[docs/STUDIO.md](docs/STUDIO.md). On Intel Macs, pin `onnxruntime==1.23.2`
-(the `intel-mac` extra): newer releases publish arm64-only macOS wheels.
-
-**[PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6)** is
-the heavier, higher-accuracy tier, offered in the Studio. Its dependencies are
-pinned in [tools/paddle/pyproject.toml](tools/paddle/pyproject.toml) (Python
-3.9–3.13, PaddlePaddle 3.2.1, `paddleocr[doc-parser]` 3.6.0+):
+[PaddleOCR-VL 1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) runs
+entirely on your machine; nothing is ever uploaded. The Studio installs it into
+`.ocr-compose-models/paddleocr-vl-1.6/` for you — roughly 1.2 GB of Python
+runtime, plus about 2 GB of weights fetched on the first page you read. The
+commands below are the manual equivalent; its dependencies are pinned in
+[tools/paddle/pyproject.toml](tools/paddle/pyproject.toml) (Python 3.9–3.13,
+PaddlePaddle 3.2.1, `paddleocr[doc-parser]` 3.6.0+):
 
 ```sh
 uv venv --python 3.13 .venv-paddleocr
 uv pip install --python .venv-paddleocr/bin/python -r tools/paddle/pyproject.toml
-export BOOKFORGE_PADDLEOCR_PYTHON="$PWD/.venv-paddleocr/bin/python"
+export OCR_COMPOSE_PADDLEOCR_PYTHON="$PWD/.venv-paddleocr/bin/python"
 ```
 
 On Apple Silicon the official local route uses `cpu`; set
-`BOOKFORGE_PADDLEOCR_DEVICE=cpu`. GPU hosts can select a Paddle device such as
+`OCR_COMPOSE_PADDLEOCR_DEVICE=cpu`. GPU hosts can select a Paddle device such as
 `gpu:0`. Direct Apple CPU inference is very slow. Paddle's supported accelerated
 Apple path keeps layout analysis local and serves the VLM with MLX-VLM (the
 `mlx` extra):
@@ -188,20 +180,20 @@ Apple path keeps layout analysis local and serves the VLM with MLX-VLM (the
 ```sh
 uv pip install --python .venv-paddleocr/bin/python -r tools/paddle/pyproject.toml --extra mlx
 .venv-paddleocr/bin/mlx_vlm.server --port 8111
-export BOOKFORGE_PADDLEOCR_VL_BACKEND=mlx-vlm-server
-export BOOKFORGE_PADDLEOCR_VL_SERVER_URL=http://localhost:8111/
-export BOOKFORGE_PADDLEOCR_VL_MODEL_NAME=PaddlePaddle/PaddleOCR-VL-1.6
+export OCR_COMPOSE_PADDLEOCR_VL_BACKEND=mlx-vlm-server
+export OCR_COMPOSE_PADDLEOCR_VL_SERVER_URL=http://localhost:8111/
+export OCR_COMPOSE_PADDLEOCR_VL_MODEL_NAME=PaddlePaddle/PaddleOCR-VL-1.6
 ```
 
-The typical PDF→EPUB flow is `bookforge pdf` … inspect/fix `book.json` …
-`bookforge pack`.
+The typical PDF→EPUB flow is `ocr-compose pdf` … inspect/fix `book.json` …
+`ocr-compose pack`.
 
 ## Repo layout
 
 ```
 DESIGN.md          the why: evidence, architecture, roadmap
-tools/             persistent OCR bridges: ocr-onnxtr.py, ocr-paddle.py,
-                   one pinned Python environment each
+tools/             the persistent OCR bridge: ocr-paddle.py and its pinned
+                   Python environment
 src/
   contract.ts      schema, validator, block walker
   inline.ts        the inline dialect: parse + render
@@ -211,11 +203,11 @@ src/
   pdf/textlayer.ts per-page verdict: which pipeline a page needs
   pdf/extract.ts   mupdf wrapper: runs, lines, images, bookmarks
   pdf/passes.ts    classify / unwrap / outline
-  pdf/ocr.ts       OCR adapter interface, block mapper, OnnxTR + Paddle engines
+  pdf/ocr.ts       OCR adapter interface, block mapper, the Paddle engine
   pdf/pdf.ts       the front-end orchestrator
-  models/          model registry, installation and provider construction
+  models/          model install, removal and warm-engine lifecycle
   studio/server.ts local Studio API and static app server
   cli.ts           pdf / unpack / pack / validate
   *.test.ts        the tests live next to what they test
-studio/            local drag/drop OCR comparison and contract editor UI
+studio/            the local drop → test → convert UI
 ```

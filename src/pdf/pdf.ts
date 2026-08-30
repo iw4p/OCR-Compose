@@ -9,13 +9,20 @@ import { classify, detectHeadings, bodyFontSize, unwrap } from "./passes.js";
 import { textlayer, type PageReport, type TextLayerVerdict } from "./textlayer.js";
 import { ocrBlocksToBookBlocks, ocrFigures, ocrImageFile, type OcrBlock, type OcrEngine } from "./ocr.js";
 
+/**
+ * The zoom scanned pages are rendered at before recognition. Exported because
+ * the Studio's single-page test must render identically — otherwise it times
+ * work the conversion will not do, and its cached result is never reused.
+ */
+export const OCR_SCALE = 3;
+
 export type PdfOptions = {
   title?: string;
   author?: string;
   language?: string;
   /** Optional 1-based source PDF pages to convert, retaining original provenance. */
   pages?: number[];
-  /** OCR engine for scan-backed pages */
+  /** OCR engine for scan-backed pages. The caller owns it, and closes it. */
   ocr?: OcrEngine;
   onProgress?: (done: number, total: number) => void;
 };
@@ -60,24 +67,20 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
   if (opts.ocr && needsOcr.length > 0) {
     const langs = opts.language ? [opts.language] : [];
     let done = 0;
-    try {
-      for (const r of needsOcr) {
-        // one render per page, shared by the OCR provider and the figure crops
-        const render = renderPage(bytes, r.page, 3);
-        const raw = await opts.ocr.recognize(render.png, langs);
-        const semantic = ocrBlocksToBookBlocks(raw, r.page);
-        if (semantic.length > 0) {
-          ocrByPage.set(r.page, raw);
-          ocrPages.add(r.page);
-          for (const figure of ocrFigures(raw)) {
-            const png = render.crop(figure.x, figure.y, figure.w, figure.h);
-            if (png) assets.set(ocrImageFile(r.page, figure), png);
-          }
+    for (const r of needsOcr) {
+      // one render per page, shared by the OCR provider and the figure crops
+      const render = renderPage(bytes, r.page, OCR_SCALE);
+      const raw = await opts.ocr.recognize(render.png, langs);
+      const semantic = ocrBlocksToBookBlocks(raw, r.page);
+      if (semantic.length > 0) {
+        ocrByPage.set(r.page, raw);
+        ocrPages.add(r.page);
+        for (const figure of ocrFigures(raw)) {
+          const png = render.crop(figure.x, figure.y, figure.w, figure.h);
+          if (png) assets.set(ocrImageFile(r.page, figure), png);
         }
-        opts.onProgress?.(++done, needsOcr.length);
       }
-    } finally {
-      await opts.ocr.close?.();
+      opts.onProgress?.(++done, needsOcr.length);
     }
     warnings.push(`${needsOcr.length} pages OCRed with ${opts.ocr.name}`);
   }
@@ -88,7 +91,7 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
     throw new Error(
       `no usable text: ${counts.scanned} scanned pages and ` +
         `${counts["no-text"]} blank pages (of ${total}). ` +
-        `Scanned PDFs need PaddleOCR-VL 1.6 (\`bookforge pdf --ocr\`).`
+        `Scanned PDFs need PaddleOCR-VL 1.6 (\`ocr-compose pdf --ocr\`).`
     );
 
   // pages the passes may use; un-OCRed scan/blank pages in a mostly-native book are

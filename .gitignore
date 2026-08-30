@@ -2,6 +2,9 @@ node_modules/
 dist/
 studio/dist/
 outputs/
+.ocr-compose-cache/
+.ocr-compose-models/
+# left over from the Bookforge-era layout; ignored so old checkouts stay clean
 .bookforge-cache/
 .bookforge-models/
 .bookforge-studio/
@@ -9,3 +12,6 @@ outputs/
 .DS_Store
 corpus/**/.DS_Store
 
+
+# Claude Code local preview config
+.claude/

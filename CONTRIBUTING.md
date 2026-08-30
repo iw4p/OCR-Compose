@@ -1,4 +1,4 @@
-# Contributing to Bookforge
+# Contributing to OCR Compose
 
 ## Setup
 
@@ -8,7 +8,7 @@ npm test
 ```
 
 That's it for the core library and CLI — no Python, no models, no GPU. Only
-the OCR path (scanned PDFs, or the Studio's model comparison) needs the
+the OCR path (scanned PDFs, or the Studio's single-page test) needs the
 PaddleOCR environment described in [README.md](README.md#using-it).
 
 To work on the Studio UI:
@@ -19,7 +19,7 @@ npm run studio:dev
 
 This runs the Vite dev server (`studio/`, hot reload) against the local API
 (`src/studio/server.ts`). `npm run studio` builds the UI once and serves it
-from the same Node process, which is what `bookforge studio` does in
+from the same Node process, which is what `ocr-compose studio` does in
 production.
 
 ## Where things live
@@ -31,13 +31,21 @@ invariants in DESIGN.md §3.2 (page-as-metadata, role-not-position,
 passes-never-lose-information) are load-bearing and any change that violates
 one needs a design-doc update, not just a code change.
 
-## Adding an OCR model provider
+## Changing the OCR model
 
-The Studio's model comparison is provider-shaped by design — see
-[docs/STUDIO.md](docs/STUDIO.md) for the ownership boundary between the
-TypeScript core and a model's own runtime, and its "Next provider checklist"
-for the concrete steps (implement the JSONL protocol, normalize to
-`OcrBlock`, register in `src/models/registry.ts`, add mapper fixtures).
+There is one model, PaddleOCR-VL, and deliberately no provider abstraction
+around it: `src/models/registry.ts` installs it, keeps one engine warm, and
+hands it out; `tools/ocr-paddle.py` loads it and answers one JSON request per
+line. [docs/STUDIO.md](docs/STUDIO.md) has the ownership boundary between the
+TypeScript core and the model's own runtime, and the disk-safety rules the
+installer and uninstaller must keep.
+
+Swapping in a different model means writing a helper that speaks the same JSONL
+protocol and normalizes its output to `OcrBlock` (ordered blocks with text, a
+semantic label, and a page-relative box). Everything downstream — the mapper,
+the contract, the EPUB writer — stays as it is. Add mapper fixtures for
+headings, paragraphs, furniture, lists, tables and formulas, and check that a
+result still produces a valid Book and a round-tripping EPUB.
 
 ## Tests
 

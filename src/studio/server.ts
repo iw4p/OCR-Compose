@@ -1,33 +1,29 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { cpus, totalmem } from "node:os";
+import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import { validateBook, type Book } from "../contract.js";
-import { readEpub } from "../epub/read.js";
+import type { Block, Book } from "../contract.js";
 import { writeEpub } from "../epub/write.js";
-import { installModel, listModels, removeModel, unloadModel, withModel } from "../models/registry.js";
+import { installModel, modelStatus, removeModel, unloadModel, withModel } from "../models/registry.js";
 import { extractPdf, renderPagePng } from "../pdf/extract.js";
-import { ocrBlocksToBookBlocks, type OcrEngine } from "../pdf/ocr.js";
-import { pdfToBook } from "../pdf/pdf.js";
+import { ocrBlocksToBookBlocks, type OcrBlock } from "../pdf/ocr.js";
+import { OCR_SCALE, pdfToBook } from "../pdf/pdf.js";
 import { textlayer, type PageReport } from "../pdf/textlayer.js";
 
-type Conversion = { assets: Map<string, Uint8Array> };
-type DocumentSession = {
+type Session = {
   id: string;
   name: string;
-  kind: "pdf" | "epub";
   bytes: Uint8Array;
-  reports?: PageReport[];
+  reports: PageReport[];
   book?: Book;
-  assets?: Map<string, Uint8Array>;
-  conversions: Map<string, Conversion>;
+  epub?: Uint8Array;
 };
 
-const sessions = new Map<string, DocumentSession>();
+const sessions = new Map<string, Session>();
 const staticRoot = fileURLToPath(new URL("../../studio/dist/", import.meta.url));
-const sessionRoot = () => join(process.cwd(), ".bookforge-studio", "sessions");
 
 const contentTypes: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -35,10 +31,6 @@ const contentTypes: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
   ".ico": "image/x-icon",
 };
 
@@ -52,8 +44,8 @@ const json = (res: ServerResponse, status: number, value: unknown) => {
   res.end(body);
 };
 
-const bytes = (res: ServerResponse, status: number, value: Uint8Array, type: string, filename?: string) => {
-  res.writeHead(status, {
+const bytes = (res: ServerResponse, value: Uint8Array, type: string, filename?: string) => {
+  res.writeHead(200, {
     "content-type": type,
     "content-length": value.byteLength,
     ...(filename && { "content-disposition": `attachment; filename="${filename.replace(/["\r\n]/g, "")}"` }),
@@ -61,7 +53,24 @@ const bytes = (res: ServerResponse, status: number, value: Uint8Array, type: str
   res.end(value);
 };
 
-const body = async (req: IncomingMessage, limit = 512 * 1024 * 1024): Promise<Uint8Array> => {
+/** One JSON event per line, so a long job can report progress while it runs. */
+const stream = (res: ServerResponse) => {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+  return (event: unknown) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+};
+
+/** Runs a streaming job, reporting a failure as the stream's last event. */
+const streamed = async (res: ServerResponse, job: (send: (event: unknown) => void) => Promise<void>) => {
+  const send = stream(res);
+  try {
+    await job(send);
+  } catch (error) {
+    send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+  }
+  res.end();
+};
+
+const readBody = async (req: IncomingMessage, limit = 512 * 1024 * 1024): Promise<Uint8Array> => {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
@@ -73,205 +82,167 @@ const body = async (req: IncomingMessage, limit = 512 * 1024 * 1024): Promise<Ui
   return new Uint8Array(Buffer.concat(chunks));
 };
 
-const bodyJson = async <T>(req: IncomingMessage): Promise<T> => {
-  const raw = await body(req, 10 * 1024 * 1024);
-  return JSON.parse(new TextDecoder().decode(raw)) as T;
-};
+const readJson = async <T>(req: IncomingMessage): Promise<T> =>
+  JSON.parse(new TextDecoder().decode(await readBody(req, 1024 * 1024))) as T;
 
+/** A page worth testing on: prefer a scanned, text-heavy page near the middle. */
 const suggestedPage = (reports: PageReport[]): number => {
   const middle = (reports.length + 1) / 2;
-  const candidates = reports.filter((report) => report.verdict !== "no-text");
+  const score = (report: PageReport) =>
+    (report.verdict === "scanned" ? 100 : 0) +
+    Math.min(report.chars, 1200) / 120 -
+    Math.abs(report.page - middle) / Math.max(1, reports.length);
   return (
-    candidates.sort((a, b) => {
-      const score = (report: PageReport) =>
-        (report.verdict === "scanned" ? 100 : 0) +
-        Math.min(report.chars, 1200) / 120 -
-        Math.abs(report.page - middle) / Math.max(1, reports.length);
-      return score(b) - score(a);
-    })[0]?.page ?? 1
+    reports
+      .filter((report) => report.verdict !== "no-text")
+      .sort((a, b) => score(b) - score(a))[0]?.page ?? 1
   );
 };
 
-const safeSession = (id: string): DocumentSession => {
-  const session = sessions.get(id);
-  if (!session) throw new Error("document session not found; upload the file again");
-  return session;
+const session = (id: string): Session => {
+  const found = sessions.get(id);
+  if (!found) throw new Error("this document is no longer loaded; add the file again");
+  return found;
+};
+
+const hardware = () => {
+  const cores = cpus();
+  return {
+    cpu: cores[0]?.model.replace(/\s+/g, " ").trim() ?? "unknown CPU",
+    cores: cores.length,
+    memoryBytes: totalmem(),
+    platform: `${process.platform}/${process.arch}`,
+  };
 };
 
 const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-  if (req.method === "GET" && url.pathname === "/api/models") {
-    json(res, 200, { models: await listModels() });
+  const post = req.method === "POST";
+  const get = req.method === "GET";
+
+  if (get && url.pathname === "/api/status") {
+    json(res, 200, { model: await modelStatus(), hardware: hardware() });
     return true;
   }
 
-  // install = put on disk, unload = free memory now, remove = delete from disk.
-  const modelMatch = /^\/api\/models\/([^/]+)\/(install|unload|remove)$/.exec(url.pathname);
-  if (req.method === "POST" && modelMatch) {
-    const id = decodeURIComponent(modelMatch[1]!);
-    const action = { install: installModel, unload: unloadModel, remove: removeModel }[modelMatch[2]!]!;
-    const result = await action(id);
-    json(res, 200, { ...result, models: await listModels() });
-    return true;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/documents") {
-    const file = await body(req);
-    if (file.byteLength === 0) throw new Error("the uploaded file is empty");
-    const encodedName = String(req.headers["x-bookforge-filename"] ?? "book.pdf");
-    const name = decodeURIComponent(encodedName).replace(/[\/\\]/g, "-");
-    const kind = name.toLowerCase().endsWith(".epub") ? "epub" : "pdf";
-    const id = randomUUID();
-    const session: DocumentSession = { id, name, kind, bytes: file, conversions: new Map() };
-    await mkdir(sessionRoot(), { recursive: true });
-    await writeFile(join(sessionRoot(), `${id}.${kind}`), file);
-
-    if (kind === "epub") {
-      const parsed = await readEpub(file);
-      session.book = parsed.book;
-      session.assets = parsed.assets;
-      sessions.set(id, session);
-      json(res, 200, {
-        document: { id, name, kind, pageCount: 0, pages: [], suggestedPage: null },
-        book: parsed.book,
-        warnings: parsed.warnings,
-      });
-      return true;
-    }
-
-    const extraction = extractPdf(file);
-    const { reports, counts } = textlayer(extraction.pages);
-    session.reports = reports;
-    sessions.set(id, session);
-    json(res, 200, {
-      document: {
-        id,
-        name,
-        kind,
-        pageCount: extraction.pages.length,
-        pages: reports,
-        counts,
-        suggestedPage: suggestedPage(reports),
-        title: extraction.meta.title,
-        author: extraction.meta.author,
-      },
+  if (post && url.pathname === "/api/model/install") {
+    await streamed(res, async (send) => {
+      const message = await installModel((line) => send({ type: "log", line }));
+      send({ type: "done", message, model: await modelStatus() });
     });
     return true;
   }
 
-  const assetMatch = /^\/api\/documents\/([^/]+)\/assets\/(.+)$/.exec(url.pathname);
-  if (req.method === "GET" && assetMatch) {
-    const session = safeSession(assetMatch[1]!);
-    const path = decodeURIComponent(assetMatch[2]!);
-    const conversionId = url.searchParams.get("conversionId");
-    const assets = (conversionId && session.conversions.get(conversionId)?.assets) || session.assets;
-    const value = assets?.get(path);
-    if (!value) throw new Error(`asset not found: ${path}`);
-    bytes(res, 200, value, contentTypes[extname(path)] ?? "application/octet-stream");
+  if (post && (url.pathname === "/api/model/unload" || url.pathname === "/api/model/remove")) {
+    const message = url.pathname.endsWith("remove") ? await removeModel() : await unloadModel();
+    json(res, 200, { message, model: await modelStatus() });
+    return true;
+  }
+
+  if (post && url.pathname === "/api/documents") {
+    const file = await readBody(req);
+    if (file.byteLength === 0) throw new Error("that file is empty");
+    const name = decodeURIComponent(String(req.headers["x-ocr-compose-filename"] ?? "book.pdf")).replace(/[\/\\]/g, "-");
+    const extraction = extractPdf(file);
+    const { reports, counts } = textlayer(extraction.pages);
+    const id = randomUUID();
+    sessions.set(id, { id, name, bytes: file, reports });
+    json(res, 200, {
+      id,
+      name,
+      sizeBytes: file.byteLength,
+      pageCount: extraction.pages.length,
+      pages: reports,
+      counts,
+      suggestedPage: suggestedPage(reports),
+      title: extraction.meta.title ?? name.replace(/\.pdf$/i, ""),
+      author: extraction.meta.author ?? "",
+    });
     return true;
   }
 
   const pageMatch = /^\/api\/documents\/([^/]+)\/pages\/(\d+)\.png$/.exec(url.pathname);
-  if (req.method === "GET" && pageMatch) {
-    const session = safeSession(pageMatch[1]!);
-    if (session.kind !== "pdf") throw new Error("page rendering is only available for PDFs");
+  if (get && pageMatch) {
+    const doc = session(pageMatch[1]!);
     const page = Number(pageMatch[2]);
-    if (!session.reports?.some((report) => report.page === page)) throw new Error("page is out of range");
-    const scale = Math.min(3, Math.max(0.5, Number(url.searchParams.get("scale") ?? 1)));
-    bytes(res, 200, renderPagePng(session.bytes, page, scale), "image/png");
+    if (!doc.reports.some((report) => report.page === page)) throw new Error("page is out of range");
+    const scale = Math.min(3, Math.max(0.2, Number(url.searchParams.get("scale") ?? 1)));
+    bytes(res, renderPagePng(doc.bytes, page, scale), "image/png");
     return true;
   }
 
-  const compareMatch = /^\/api\/documents\/([^/]+)\/compare$/.exec(url.pathname);
-  if (req.method === "POST" && compareMatch) {
-    const session = safeSession(compareMatch[1]!);
-    if (session.kind !== "pdf") throw new Error("model comparison is only available for PDFs");
-    const request = await bodyJson<{ page: number; modelIds: string[] }>(req);
-    if (!session.reports?.some((report) => report.page === request.page)) throw new Error("sample page is out of range");
-    const pagePng = renderPagePng(session.bytes, request.page, 2);
-    const results = [];
-    // Sequential on purpose: one model is resident at a time. Engines stay warm
-    // afterwards, so the convert that follows reuses the loaded weights.
-    for (const modelId of request.modelIds) {
-      const started = performance.now();
-      try {
-        const blocks = await withModel(modelId, (engine) => engine.recognize(pagePng, []));
-        results.push({
-          modelId,
-          ok: true,
-          elapsedMs: Math.round(performance.now() - started),
-          blocks,
-          contractBlocks: ocrBlocksToBookBlocks(blocks, request.page),
-        });
-      } catch (error) {
-        results.push({
-          modelId,
-          ok: false,
-          elapsedMs: Math.round(performance.now() - started),
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    json(res, 200, { page: request.page, results });
-    return true;
-  }
-
-  const convertMatch = /^\/api\/documents\/([^/]+)\/convert$/.exec(url.pathname);
-  if (req.method === "POST" && convertMatch) {
-    const session = safeSession(convertMatch[1]!);
-    if (session.kind !== "pdf") throw new Error("this document is already editable");
-    const request = await bodyJson<{
-      pages: number[];
-      modelId?: string;
-      title?: string;
-      author?: string;
-      language?: string;
-    }>(req);
-    const selected = [...new Set(request.pages)].sort((a, b) => a - b);
-    if (selected.length === 0) throw new Error("select at least one page");
-    const selectedReports = session.reports?.filter((report) => selected.includes(report.page)) ?? [];
-    const needsOcr = selectedReports.some((report) => report.verdict === "scanned");
-    const convert = async (engine?: OcrEngine) =>
-      await pdfToBook(session.bytes, {
-        pages: selected,
-        ...(request.title && { title: request.title }),
-        ...(request.author && { author: request.author }),
-        language: request.language || "en",
-        ...(engine && { ocr: engine }),
-      });
-    // The model stays loaded for the whole conversion and idles out afterwards.
-    const result = needsOcr ? await withModel(request.modelId ?? "", convert) : await convert();
-    const conversionId = randomUUID();
-    session.conversions.set(conversionId, { assets: result.assets });
+  // The test run: recognize one page for real (never from cache) so its
+  // duration is an honest per-page cost to project the whole book from. It
+  // renders at the conversion's own scale, so the timing matches the work the
+  // conversion will do and the conversion reuses this page's cached result.
+  const testMatch = /^\/api\/documents\/([^/]+)\/test$/.exec(url.pathname);
+  if (post && testMatch) {
+    const doc = session(testMatch[1]!);
+    const { page } = await readJson<{ page: number }>(req);
+    if (!doc.reports.some((report) => report.page === page)) throw new Error("page is out of range");
+    const png = renderPagePng(doc.bytes, page, OCR_SCALE);
+    let started = performance.now();
+    const raw = await withModel((engine) => {
+      started = performance.now(); // loading weights is a one-time cost, not per page
+      return engine.recognize(png, [], { fresh: true });
+    });
     json(res, 200, {
-      conversionId,
-      book: result.book,
-      warnings: result.warnings,
-      report: result.report,
+      page,
+      elapsedMs: Math.round(performance.now() - started),
+      regions: raw as OcrBlock[],
+      blocks: ocrBlocksToBookBlocks(raw, page) as Block[],
     });
     return true;
   }
 
-  if (req.method === "POST" && url.pathname === "/api/validate") {
-    const request = await bodyJson<{ book: unknown }>(req);
-    json(res, 200, { issues: validateBook(request.book) });
+  const convertMatch = /^\/api\/documents\/([^/]+)\/convert$/.exec(url.pathname);
+  if (post && convertMatch) {
+    const doc = session(convertMatch[1]!);
+    const request = await readJson<{ pages: number[]; title?: string; author?: string; language?: string }>(req);
+    const pages = [...new Set(request.pages)].sort((a, b) => a - b);
+    if (pages.length === 0) throw new Error("select at least one page");
+    const needsOcr = doc.reports.some((report) => pages.includes(report.page) && report.verdict === "scanned");
+    await streamed(res, async (send) => {
+      send({ type: "stage", stage: needsOcr ? "Loading the model" : "Reading pages" });
+      const options = {
+        pages,
+        ...(request.title && { title: request.title }),
+        ...(request.author && { author: request.author }),
+        language: request.language || "en",
+        onProgress: (done: number, total: number) =>
+          send({ type: "progress", stage: "Recognizing scanned pages", done, total }),
+      };
+      const result = needsOcr
+        ? await withModel((engine) => pdfToBook(doc.bytes, { ...options, ocr: engine }))
+        : await pdfToBook(doc.bytes, options);
+      send({ type: "stage", stage: "Packing the EPUB" });
+      doc.book = result.book;
+      doc.epub = await writeEpub(result.book, result.assets);
+      send({
+        type: "done",
+        stats: {
+          blocks: result.book.content.length,
+          footnotes: Object.keys(result.book.footnotes).length,
+          epubBytes: doc.epub.byteLength,
+          counts: result.report.counts,
+        },
+        warnings: result.warnings,
+      });
+    });
     return true;
   }
 
-  if (req.method === "POST" && url.pathname === "/api/export/epub") {
-    const request = await bodyJson<{ documentId: string; conversionId?: string; book: unknown }>(req);
-    const issues = validateBook(request.book);
-    if (issues.length > 0) {
-      json(res, 422, { error: "Book contract is invalid", issues });
-      return true;
+  const downloadMatch = /^\/api\/documents\/([^/]+)\/(epub|book\.json)$/.exec(url.pathname);
+  if (get && downloadMatch) {
+    const doc = session(downloadMatch[1]!);
+    const base = doc.name.replace(/\.pdf$/i, "");
+    if (downloadMatch[2] === "epub") {
+      if (!doc.epub) throw new Error("nothing converted yet");
+      bytes(res, doc.epub, "application/epub+zip", `${base}.epub`);
+    } else {
+      if (!doc.book) throw new Error("nothing converted yet");
+      const body = new TextEncoder().encode(JSON.stringify(doc.book, null, 2) + "\n");
+      bytes(res, body, "application/json", `${base}.book.json`);
     }
-    const session = safeSession(request.documentId);
-    const assets = request.conversionId
-      ? session.conversions.get(request.conversionId)?.assets
-      : session.assets;
-    if (!assets) throw new Error("conversion assets are no longer available; convert the document again");
-    const epub = await writeEpub(request.book as Book, assets);
-    const filename = session.name.replace(/\.(pdf|epub)$/i, "") + "-bookforge.epub";
-    bytes(res, 200, epub, "application/epub+zip", filename);
     return true;
   }
 
@@ -286,15 +257,13 @@ const staticFile = async (res: ServerResponse, pathname: string) => {
     return;
   }
   try {
-    const value = new Uint8Array(await readFile(path));
-    bytes(res, 200, value, contentTypes[extname(path)] ?? "application/octet-stream");
+    bytes(res, new Uint8Array(await readFile(path)), contentTypes[extname(path)] ?? "application/octet-stream");
   } catch {
     json(res, 404, { error: "not found" });
   }
 };
 
 export async function startStudio(options: { host?: string; port?: number } = {}) {
-  await mkdir(sessionRoot(), { recursive: true });
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -302,7 +271,8 @@ export async function startStudio(options: { host?: string; port?: number } = {}
         if (!(await api(req, res, url))) json(res, 404, { error: "API route not found" });
       } else await staticFile(res, url.pathname);
     } catch (error) {
-      json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      if (!res.headersSent) json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      else res.end();
     }
   });
   await new Promise<void>((resolve, reject) => {

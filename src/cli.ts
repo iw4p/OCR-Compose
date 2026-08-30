@@ -32,20 +32,21 @@ export async function pdfToBookDir(
   opts: { title?: string; author?: string; language?: string; pages?: number[]; ocr?: boolean } = {}
 ): Promise<{ warnings: string[]; counts: Record<string, number> }> {
   const { pdfToBook } = await import("./pdf/pdf.js");
-  // the default provider; the Studio is where another one is chosen
-  const { onnxtrEngine } = await import("./pdf/ocr.js");
+  const { paddleEngine } = await import("./pdf/ocr.js");
+  // whoever creates the engine closes it; pdfToBook only borrows it
+  const engine = opts.ocr ? paddleEngine() : undefined;
   const { book, assets, warnings, report } = await pdfToBook(new Uint8Array(await readFile(pdfPath)), {
     ...(opts.title !== undefined && { title: opts.title }),
     ...(opts.author !== undefined && { author: opts.author }),
     ...(opts.language !== undefined && { language: opts.language }),
     ...(opts.pages !== undefined && { pages: opts.pages }),
-    ...(opts.ocr && {
-      ocr: onnxtrEngine(),
+    ...(engine && {
+      ocr: engine,
       onProgress: (done: number, total: number) => {
         if (done % 10 === 0 || done === total) console.error(`ocr: ${done}/${total} pages`);
       },
     }),
-  });
+  }).finally(() => engine?.close?.());
   await writeBookDir(bookDir, book, assets);
   return { warnings, counts: report.counts };
 }
@@ -101,7 +102,7 @@ async function main(argv: string[]): Promise<number> {
     switch (command) {
       case "unpack": {
         const [epub, dir] = args;
-        if (!epub || !dir) throw new Error("usage: bookforge unpack <in.epub> <book-dir>");
+        if (!epub || !dir) throw new Error("usage: ocr-compose unpack <in.epub> <book-dir>");
         const warnings = await unpackEpub(epub, dir);
         for (const w of warnings) console.error(`warning: ${w}`);
         console.log(`unpacked to ${dir}/book.json${warnings.length ? ` (${warnings.length} warnings)` : ""}`);
@@ -109,7 +110,7 @@ async function main(argv: string[]): Promise<number> {
       }
       case "pack": {
         const [dir, epub] = args;
-        if (!dir || !epub) throw new Error("usage: bookforge pack <book-dir> <out.epub>");
+        if (!dir || !epub) throw new Error("usage: ocr-compose pack <book-dir> <out.epub>");
         await packBookDir(dir, epub);
         console.log(`packed ${epub}`);
         return 0;
@@ -122,7 +123,7 @@ async function main(argv: string[]): Promise<number> {
         };
         const [pdf, dir] = positional;
         if (!pdf || !dir)
-          throw new Error("usage: bookforge pdf <in.pdf> <book-dir> [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]");
+          throw new Error("usage: ocr-compose pdf <in.pdf> <book-dir> [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]");
         const opts = {
           ...(flag("title") !== undefined && { title: flag("title")! }),
           ...(flag("author") !== undefined && { author: flag("author")! }),
@@ -138,7 +139,7 @@ async function main(argv: string[]): Promise<number> {
       }
       case "validate": {
         const [dir] = args;
-        if (!dir) throw new Error("usage: bookforge validate <book-dir>");
+        if (!dir) throw new Error("usage: ocr-compose validate <book-dir>");
         const issues = await validateBookDir(dir);
         if (issues.length === 0) {
           console.log("valid");
@@ -151,10 +152,10 @@ async function main(argv: string[]): Promise<number> {
         const portFlag = args.indexOf("--port");
         const port = portFlag === -1 ? 4173 : Number(args[portFlag + 1]);
         if (!Number.isInteger(port) || port < 0 || port > 65535)
-          throw new Error("usage: bookforge studio [--port 4173]");
+          throw new Error("usage: ocr-compose studio [--port 4173]");
         const { startStudio } = await import("./studio/server.js");
         const studio = await startStudio({ port });
-        console.log(`Bookforge Studio: ${studio.url}`);
+        console.log(`OCR Compose Studio: ${studio.url}`);
         await new Promise<void>((resolve) => {
           const stop = () => studio.server.close(() => resolve());
           process.once("SIGINT", stop);
@@ -163,7 +164,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       default:
-        console.error("usage: bookforge <pdf|unpack|pack|validate|studio> …");
+        console.error("usage: ocr-compose <pdf|unpack|pack|validate|studio> …");
         return 2;
     }
   } catch (e) {

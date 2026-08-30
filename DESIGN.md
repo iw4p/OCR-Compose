@@ -1,4 +1,4 @@
-# Bookforge — Design Document
+# OCR Compose — Design Document
 
 **Status:** draft v0.2 — pre-implementation
 **Date:** 2026-08-24
@@ -376,7 +376,7 @@ exactly this.
   argument for `matches` in one line.)
 - Tooling rule: anything that edits `text` re-derives offsets from `matches`;
   a human who edits by hand only has to keep `matches` in sync and can let
-  `bookforge fix-offsets` recompute the numbers.
+  `ocr-compose fix-offsets` recompute the numbers.
 
 ### 4.6 Known open question
 
@@ -545,7 +545,7 @@ already exist to check against. The PDF front end has no ground truth until the
 back end works.
 
 ```
-bookforge/
+ocr-compose/
   src/
     contract.ts      ← schema, validateBook, walkBlocks
     inline.ts        ← §4.3 tokenizer, part of the contract package

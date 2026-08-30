@@ -1,50 +1,49 @@
+// The one OCR model OCR Compose installs and runs: PaddleOCR-VL, in an isolated
+// Python venv under `.ocr-compose-models/`. Installation is a subprocess whose
+// output is streamed to the caller, so the UI can show real download progress.
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
-import { onnxtrEngine, paddleEngine, type OcrEngine } from "../pdf/ocr.js";
+import { paddleEngine, type OcrEngine } from "../pdf/ocr.js";
 
-export type ModelCapability = "layout" | "multilingual" | "tables" | "formulas";
-
-/** Where an installed runtime lives. Only `managed` runtimes may be removed. */
-export type ModelSource = "managed" | "external";
+export const MODEL_ID = "paddleocr-vl-1.6";
 
 export type ModelStatus = {
-  installed: boolean;
-  source: ModelSource | null;
-  /** Approximate bytes under `.bookforge-models/<id>/`; 0 for external runtimes. */
-  diskBytes: number;
-};
-
-export type ModelInfo = ModelStatus & {
   id: string;
   name: string;
   version: string;
   description: string;
-  capabilities: ModelCapability[];
-  installLabel: string;
-  firstRunNote: string;
-  /** True while a warm engine is held in memory for this model. */
+  /** True once a usable Python environment exists — ours or the operator's. */
+  installed: boolean;
+  /** `managed` = we installed it and may delete it. `external` = the operator's. */
+  source: "managed" | "external" | null;
+  /** Bytes under `.ocr-compose-models/<id>/`; 0 for an external runtime. */
+  diskBytes: number;
+  /** Bytes of model weights actually downloaded into the shared PaddleX cache. */
+  weightsDiskBytes: number;
+  /** What a fresh install costs to download, before anything is on disk. */
+  runtimeDownloadBytes: number;
+  weightsDownloadBytes: number;
+  /** True while a warm engine is held in memory. */
   loaded: boolean;
 };
 
-const PADDLE_ID = "paddleocr-vl-1.6";
-const ONNXTR_ID = "onnxtr-0.9";
-
 /**
- * The only directory tree Bookforge ever deletes. Resolved and re-checked on
- * every use so no id, symlink or env var can escape it — a user-provided
- * interpreter (`BOOKFORGE_PADDLEOCR_PYTHON`, `.venv-paddleocr/`) is never ours.
+ * The only directory tree OCR Compose ever deletes. Resolved and re-checked on
+ * every use so no symlink or env var can escape it — a user-provided
+ * interpreter (`OCR_COMPOSE_PADDLEOCR_PYTHON`, `.venv-paddleocr/`) is never ours.
  */
 export const managedModelDir = (id: string) => {
-  const root = resolve(process.cwd(), ".bookforge-models");
+  const root = resolve(process.cwd(), ".ocr-compose-models");
   const dir = resolve(root, id);
   if (dir === root || !dir.startsWith(root + sep)) throw new Error(`refusing to manage ${dir}`);
   return dir;
 };
-const venvDir = (id: string) => join(managedModelDir(id), "venv");
-const venvPython = (id: string) =>
-  process.platform === "win32" ? join(venvDir(id), "Scripts", "python.exe") : join(venvDir(id), "bin", "python");
+const venvDir = () => join(managedModelDir(MODEL_ID), "venv");
+const venvPython = () =>
+  process.platform === "win32" ? join(venvDir(), "Scripts", "python.exe") : join(venvDir(), "bin", "python");
 
 /** Recursive apparent size. Symlinks are counted as neither file nor directory. */
 const dirBytes = async (dir: string): Promise<number> => {
@@ -68,224 +67,143 @@ const executable = async (path: string) => {
 };
 
 /** The first usable interpreter: the operator's, then ours. `null` if none is. */
-const pythonPath = async (...candidates: (string | undefined)[]): Promise<string | null> => {
+const findPython = async (): Promise<string | null> => {
+  const candidates = [
+    process.env.OCR_COMPOSE_PADDLEOCR_PYTHON,
+    venvPython(),
+    join(process.cwd(), ".venv-paddleocr", process.platform === "win32" ? "Scripts/python.exe" : "bin/python3"),
+  ];
   for (const candidate of candidates) if (candidate && (await executable(candidate))) return candidate;
   return null;
 };
 
-const paddlePython = () =>
-  pythonPath(
-    process.env.BOOKFORGE_PADDLEOCR_PYTHON,
-    venvPython(PADDLE_ID),
-    join(process.cwd(), ".venv-paddleocr", process.platform === "win32" ? "Scripts/python.exe" : "bin/python3")
-  );
-
-const onnxtrPython = () => pythonPath(process.env.BOOKFORGE_ONNXTR_PYTHON, venvPython(ONNXTR_ID));
-
-const run = async (command: string, args: string[]): Promise<string> =>
-  await new Promise((resolve, reject) => {
+const run = async (command: string, args: string[], onLog?: (line: string) => void): Promise<string> =>
+  await new Promise((done, fail) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    let partial = "";
+    const read = (chunk: string) => {
+      output = (output + chunk).slice(-32_768);
+      if (!onLog) return;
+      partial += chunk;
+      const lines = partial.split(/\r?\n|\r/);
+      partial = lines.pop() ?? "";
+      for (const line of lines) if (line.trim()) onLog(line.trim());
+    };
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => (output = (output + chunk).slice(-32_768)));
-    child.stderr.on("data", (chunk: string) => (output = (output + chunk).slice(-32_768)));
-    child.once("error", reject);
+    child.stdout.on("data", read);
+    child.stderr.on("data", read);
+    child.once("error", fail);
     child.once("close", (code) => {
-      if (code === 0) resolve(output);
-      else reject(new Error(`${command} exited with code ${code ?? "unknown"}\n${output}`));
+      if (partial.trim()) onLog?.(partial.trim());
+      if (code === 0) done(output);
+      else fail(new Error(`${command} exited with code ${code ?? "unknown"}\n${output}`));
     });
   });
 
-/** Ours or the operator's, and what our own tree costs on disk. */
-const runtimeStatus = async (id: string, python: string | null): Promise<ModelStatus> => {
-  const managed = managedModelDir(id);
+export async function modelStatus(): Promise<ModelStatus> {
+  const python = await findPython();
+  const managed = managedModelDir(MODEL_ID);
   return {
-    installed: python !== null,
-    source: python === null ? null : resolve(python).startsWith(managed + sep) ? "managed" : "external",
-    diskBytes: await dirBytes(managed),
-  };
-};
-
-/** An isolated venv under `.bookforge-models/<id>/`, never a shared one. */
-const createVenv = async (id: string, minimumMinor = 0): Promise<string> => {
-  const base = process.env.BOOKFORGE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
-  const version = (await run(base, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"])).trim();
-  const [major, minor] = version.split(/\s+/).map(Number);
-  if (major !== 3 || minor! < minimumMinor)
-    throw new Error(
-      `${base} is Python ${major}.${minor}; this model needs 3.${minimumMinor} or newer. ` +
-        "Set BOOKFORGE_PYTHON to one that is."
-    );
-  await mkdir(managedModelDir(id), { recursive: true });
-  await run(base, ["-m", "venv", venvDir(id)]);
-  const python = venvPython(id);
-  await run(python, ["-m", "pip", "install", "--upgrade", "pip"]);
-  return python;
-};
-
-const removeRuntime = async (id: string, name: string, weightsHome: string): Promise<string> => {
-  const dir = managedModelDir(id);
-  if (!(await stat(dir).catch(() => null))) return `No managed ${name} runtime on disk.`;
-  await rm(dir, { recursive: true, force: true });
-  return `Removed the managed ${name} runtime. Downloaded weights stay in ${weightsHome}.`;
-};
-
-export type ModelProvider = {
-  info: Omit<ModelInfo, keyof ModelStatus | "loaded">;
-  status(): Promise<ModelStatus>;
-  create(): Promise<OcrEngine>;
-  install(): Promise<string>;
-  /** Deletes what `install` put on disk. Must only ever touch `managedModelDir`. */
-  remove(): Promise<string>;
-};
-
-const paddleProvider: ModelProvider = {
-  info: {
-    id: PADDLE_ID,
+    id: MODEL_ID,
     name: "PaddleOCR-VL",
     version: "1.6",
     description: "Document layout, multilingual OCR, tables and formulas.",
-    capabilities: ["layout", "multilingual", "tables", "formulas"],
-    installLabel: "Install runtime",
-    firstRunNote: "The first comparison may download the official model weights.",
-  },
-  async status() {
-    return await runtimeStatus(PADDLE_ID, await paddlePython());
-  },
-  async create() {
-    const python = await paddlePython();
-    if (!python) throw new Error("PaddleOCR-VL is not installed. Install it from the Models panel first.");
-    return paddleEngine({ pythonPath: python });
-  },
-  async install() {
-    if (await paddlePython()) return "PaddleOCR-VL is already installed.";
-    const python = await createVenv(PADDLE_ID);
-    await run(python, ["-m", "pip", "install", "paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.6.0"]);
-    return "PaddleOCR-VL runtime installed. Official model weights download automatically on first use.";
-  },
-  async remove() {
-    return await removeRuntime(PADDLE_ID, "PaddleOCR-VL", "the shared PaddleX/HuggingFace cache");
-  },
-};
-
-const onnxtrProvider: ModelProvider = {
-  info: {
-    id: ONNXTR_ID,
-    name: "OnnxTR",
-    version: "0.9",
-    description: "Pure ONNX, no PyTorch: layout, reading order and table structure on any CPU.",
-    // no formulas: OnnxTR recognizes text, not math, so a formula is kept as a picture
-    capabilities: ["layout", "multilingual", "tables"],
-    installLabel: "Install runtime",
-    firstRunNote: "The first comparison downloads about 275 MB of ONNX weights.",
-  },
-  async status() {
-    return await runtimeStatus(ONNXTR_ID, await onnxtrPython());
-  },
-  async create() {
-    const python = await onnxtrPython();
-    if (!python) throw new Error("OnnxTR is not installed. Install it from the Models panel first.");
-    return onnxtrEngine({ pythonPath: python });
-  },
-  async install() {
-    if (await onnxtrPython()) return "OnnxTR is already installed.";
-    const python = await createVenv(ONNXTR_ID, 11);
-    // Intel Macs: onnxruntime ships arm64-only wheels from 1.24.1 onwards.
-    const intelMac = process.platform === "darwin" && process.arch === "x64";
-    if (intelMac) await run(python, ["-m", "pip", "install", "onnxruntime==1.23.2"]);
-    await run(python, ["-m", "pip", "install", "onnxtr[cpu]==0.9.0"]);
-    return "OnnxTR runtime installed. The ONNX weights download automatically on first use.";
-  },
-  async remove() {
-    return await removeRuntime(ONNXTR_ID, "OnnxTR", "ONNXTR_CACHE_DIR");
-  },
-};
-
-// One provider object is the entire extension point for future models. The
-// studio and document pipeline never switch on model-specific behavior. OnnxTR
-// is first because it is the one that runs everywhere.
-const providers: ModelProvider[] = [onnxtrProvider, paddleProvider];
-const provider = (id: string) => {
-  const found = providers.find((candidate) => candidate.info.id === id);
-  if (!found) throw new Error(`unknown OCR model: ${id}`);
-  return found;
-};
-
-/** Adds a provider to the registry. The Studio picks it up with no other change. */
-export function registerProvider(item: ModelProvider): void {
-  providers.push(item);
+    installed: python !== null,
+    source: python === null ? null : resolve(python).startsWith(managed + sep) ? "managed" : "external",
+    diskBytes: await dirBytes(managed),
+    weightsDiskBytes: await dirBytes(join(homedir(), ".paddlex", "official_models")),
+    runtimeDownloadBytes: 1_200_000_000,
+    weightsDownloadBytes: 2_000_000_000,
+    loaded: warm !== null,
+  };
 }
 
-// Keep-alive, like `ollama`: a model stays warm between requests and unloads
-// itself once idle, so a comparison and the conversion that follows it pay the
+/** Creates an isolated venv and pip-installs PaddleOCR into it. */
+export async function installModel(onLog: (line: string) => void = () => {}): Promise<string> {
+  if (await findPython()) return "PaddleOCR-VL is already installed.";
+  const base = process.env.OCR_COMPOSE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+  const version = (await run(base, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"])).trim();
+  const [major] = version.split(/\s+/).map(Number);
+  if (major !== 3) throw new Error(`${base} is not Python 3. Set OCR_COMPOSE_PYTHON to one that is.`);
+  onLog(`Creating a Python environment with ${base}…`);
+  await mkdir(managedModelDir(MODEL_ID), { recursive: true });
+  await run(base, ["-m", "venv", venvDir()]);
+  const python = venvPython();
+  await run(python, ["-m", "pip", "install", "--upgrade", "pip"], onLog);
+  onLog("Downloading PaddlePaddle and PaddleOCR (about 1.2 GB)…");
+  await run(python, ["-m", "pip", "install", "paddlepaddle>=3.2.1", "paddleocr[doc-parser]>=3.6.0"], onLog);
+  return "Runtime installed. The model weights (~2 GB) download on the first page you run.";
+}
+
+/** Destructive: unloads, then deletes the managed runtime from disk. */
+export async function removeModel(): Promise<string> {
+  await unloadModel();
+  const dir = managedModelDir(MODEL_ID);
+  if (!(await stat(dir).catch(() => null))) return "No managed PaddleOCR-VL runtime on disk.";
+  await rm(dir, { recursive: true, force: true });
+  return "Removed the managed runtime. Downloaded weights stay in the shared PaddleX cache.";
+}
+
+// Keep-alive, like `ollama`: the model stays warm between requests and unloads
+// itself once idle, so a test page and the conversion that follows pay the
 // weight-loading cost once. Engines are refcounted; only the last user closes.
 type Warm = { engine: Promise<OcrEngine>; users: number; idle?: ReturnType<typeof setTimeout> };
-const warm = new Map<string, Warm>();
-const idleMs = () => Number(process.env.BOOKFORGE_MODEL_IDLE_MS ?? 300_000);
+let warm: Warm | null = null;
+const idleMs = () => Number(process.env.OCR_COMPOSE_MODEL_IDLE_MS ?? 300_000);
 
 const shutdown = async (entry: Warm) => {
   await entry.engine.then((engine) => engine.close?.()).catch(() => {});
 };
 
-const release = (id: string, entry: Warm) => {
-  const cached = warm.get(id) === entry;
+const release = (entry: Warm) => {
+  const cached = warm === entry;
   if (!cached || idleMs() <= 0) {
-    if (cached) warm.delete(id);
+    if (cached) warm = null;
     void shutdown(entry);
     return;
   }
   entry.idle = setTimeout(() => {
-    if (warm.get(id) !== entry) return;
-    warm.delete(id);
+    if (warm !== entry) return;
+    warm = null;
     void shutdown(entry);
   }, idleMs());
   entry.idle.unref?.();
 };
 
+const createEngine = async (): Promise<OcrEngine> => {
+  const python = await findPython();
+  if (!python) throw new Error("PaddleOCR-VL is not installed. Install it first.");
+  return paddleEngine({ pythonPath: python });
+};
+
 /**
- * Runs `use` against a warm engine for `id`, loading one if needed. A failure
- * evicts the engine so a crashed process never poisons the next request.
+ * Runs `use` against a warm engine, loading one if needed. A failure evicts the
+ * engine so a crashed helper process never poisons the next request.
  */
-export async function withModel<T>(id: string, use: (engine: OcrEngine) => Promise<T>): Promise<T> {
-  let entry = warm.get(id);
-  if (!entry) warm.set(id, (entry = { engine: provider(id).create(), users: 0 }));
+export async function withModel<T>(use: (engine: OcrEngine) => Promise<T>): Promise<T> {
+  let entry = warm;
+  if (!entry) warm = entry = { engine: createEngine(), users: 0 };
   if (entry.idle) clearTimeout(entry.idle);
   entry.idle = undefined;
   entry.users++;
   try {
     return await use(await entry.engine);
   } catch (error) {
-    if (warm.get(id) === entry) warm.delete(id);
+    if (warm === entry) warm = null;
     throw error;
   } finally {
-    if (--entry.users === 0) release(id, entry);
+    if (--entry.users === 0) release(entry);
   }
 }
 
-export async function listModels(): Promise<ModelInfo[]> {
-  return await Promise.all(
-    providers.map(async (item) => ({ ...item.info, ...(await item.status()), loaded: warm.has(item.info.id) }))
-  );
-}
-
-export async function installModel(id: string): Promise<{ message: string }> {
-  return { message: await provider(id).install() };
-}
-
 /** Frees memory now. An engine still serving a request closes when it finishes. */
-export async function unloadModel(id: string): Promise<{ message: string }> {
-  const { name } = provider(id).info;
-  const entry = warm.get(id);
-  if (!entry) return { message: `${name} is not loaded.` };
-  warm.delete(id);
+export async function unloadModel(): Promise<string> {
+  const entry = warm;
+  if (!entry) return "PaddleOCR-VL is not loaded.";
+  warm = null;
   if (entry.idle) clearTimeout(entry.idle);
   if (entry.users === 0) await shutdown(entry);
-  return { message: `${name} unloaded from memory.` };
-}
-
-/** Destructive: unloads, then deletes the managed runtime from disk. */
-export async function removeModel(id: string): Promise<{ message: string }> {
-  await unloadModel(id);
-  return { message: await provider(id).remove() };
+  return "PaddleOCR-VL unloaded from memory.";
 }

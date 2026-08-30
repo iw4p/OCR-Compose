@@ -1,265 +1,225 @@
 import { useEffect, useState } from "react";
 import * as api from "./api";
-import type { Book, CompareResult, DocumentInfo, ModelInfo, ValidationIssue } from "./api";
-import { Dropzone } from "./components/Dropzone";
-import { SelectScreen } from "./components/SelectScreen";
-import { EditorScreen } from "./components/EditorScreen";
-import { Toast, BusyOverlay } from "./components/Toast";
+import type { ConvertStats, Doc, Hardware, ModelStatus, TestResult } from "./api";
+import { estimate } from "./estimate";
+import { ModelCard } from "./components/ModelCard";
+import { Dropzone, FileCard } from "./components/FileCard";
+import { TestCard } from "./components/TestCard";
+import { ConvertCard, type Job, type Meta } from "./components/ConvertCard";
 
-type Step = "upload" | "select" | "edit";
-
-export default function App() {
-  const [step, setStep] = useState<Step>("upload");
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [pendingModels, setPendingModels] = useState<Set<string>>(new Set());
-  const [document, setDocumentInfo] = useState<DocumentInfo | null>(null);
-  const [book, setBook] = useState<Book | null>(null);
-  const [conversionId, setConversionId] = useState<string | undefined>(undefined);
-  const [selectedPages, setSelectedPages] = useState<Set<number>>(new Set());
-  const [samplePage, setSamplePage] = useState<number | null>(null);
-  const [compareSelection, setCompareSelection] = useState<Set<string>>(new Set());
-  const [comparison, setComparison] = useState<CompareResult[]>([]);
-  const [comparing, setComparing] = useState(false);
-  const [convertModelId, setConvertModelId] = useState<string | null>(null);
-  const [converting, setConverting] = useState(false);
-  const [validating, setValidating] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [issues, setIssues] = useState<ValidationIssue[]>([]);
-  const [validated, setValidated] = useState(false);
-  const [busy, setBusy] = useState<{ title: string; copy?: string } | null>(null);
-  const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
-
-  // Comparison is a way to choose a model, never a step you owe the app: the
-  // first installed provider converts unless the operator picks another one.
-  const installed = models.filter((model) => model.installed);
-  const convertModel =
-    (convertModelId && installed.some((model) => model.id === convertModelId) ? convertModelId : installed[0]?.id) ??
-    null;
-
+/** A clock that only runs while something long is happening. */
+function useElapsed(since: number | null): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    api
-      .listModels()
-      .then((r) => setModels(r.models))
-      .catch((e) => notify(e, "error"));
-  }, []);
-
-  function notify(error: unknown, tone: "info" | "error" = "info") {
-    const message = error instanceof Error ? error.message : String(error);
-    setToast({ message, tone });
-    window.clearTimeout((notify as any)._t);
-    (notify as any)._t = window.setTimeout(() => setToast(null), 5000);
-  }
-
-  async function handleUpload(file: File) {
-    setBusy({ title: "Reading document", copy: file.name });
-    try {
-      const result = await api.uploadDocument(file);
-      setDocumentInfo(result.document);
-      if (result.book) {
-        setBook(result.book);
-        setStep("edit");
-        if (result.warnings?.length) notify(`Loaded with ${result.warnings.length} warning(s): ${result.warnings[0]}`);
-      } else {
-        setSelectedPages(new Set(result.document.pages.filter((p) => p.verdict !== "no-text").map((p) => p.page)));
-        setSamplePage(result.document.suggestedPage);
-        setComparison([]);
-        setConvertModelId(null);
-        setStep("select");
-      }
-    } catch (e) {
-      notify(e, "error");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function handleModelAction(id: string, action: api.ModelAction) {
-    setPendingModels((s) => new Set(s).add(id));
-    try {
-      const result = await api.runModelAction(id, action);
-      setModels(result.models);
-      notify(result.message);
-    } catch (e) {
-      notify(e, "error");
-    } finally {
-      setPendingModels((s) => {
-        const next = new Set(s);
-        next.delete(id);
-        return next;
-      });
-    }
-  }
-
-  async function handleCompare() {
-    if (!document || samplePage === null) return;
-    setComparing(true);
-    try {
-      const result = await api.compareModels(document.id, samplePage, [...compareSelection]);
-      setComparison(result.results);
-    } catch (e) {
-      notify(e, "error");
-    } finally {
-      setComparing(false);
-    }
-  }
-
-  async function handleConvert(meta: { title: string; author: string; language: string }) {
-    if (!document) return;
-    setConverting(true);
-    setBusy({ title: "Converting", copy: `${selectedPages.size} page(s)` });
-    try {
-      const result = await api.convertDocument(document.id, {
-        pages: [...selectedPages],
-        modelId: convertModel ?? undefined,
-        ...meta,
-      });
-      setBook(result.book);
-      setConversionId(result.conversionId);
-      setIssues([]);
-      setValidated(false);
-      setStep("edit");
-      if (result.warnings.length) notify(`Converted with ${result.warnings.length} warning(s): ${result.warnings[0]}`);
-    } catch (e) {
-      notify(e, "error");
-    } finally {
-      setConverting(false);
-      setBusy(null);
-    }
-  }
-
-  async function handleValidate() {
-    if (!book) return;
-    setValidating(true);
-    try {
-      const result = await api.validateBook(book);
-      setIssues(result.issues);
-      setValidated(true);
-      notify(result.issues.length === 0 ? "Valid — no issues." : `${result.issues.length} issue(s) found.`, result.issues.length ? "error" : "info");
-    } catch (e) {
-      notify(e, "error");
-    } finally {
-      setValidating(false);
-    }
-  }
-
-  async function handleExport() {
-    if (!book || !document) return;
-    setExporting(true);
-    try {
-      const blob = await api.exportEpub(document.id, book, conversionId);
-      downloadBlob(blob, `${book.title || "book"}.epub`);
-    } catch (e: any) {
-      if (e?.issues) {
-        setIssues(e.issues);
-        setValidated(true);
-      }
-      notify(e, "error");
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  function handleDownloadJson() {
-    if (!book) return;
-    downloadBlob(new Blob([JSON.stringify(book, null, 2)], { type: "application/json" }), "book.json");
-  }
-
-  function reset() {
-    setStep("upload");
-    setDocumentInfo(null);
-    setBook(null);
-    setConversionId(undefined);
-    setIssues([]);
-    setValidated(false);
-  }
-
-  function handleBookChange(next: Book) {
-    setBook(next);
-    setValidated(false);
-  }
-
-  return (
-    <div className="app-shell">
-      <header className="app-header">
-        <button type="button" className="brand" onClick={reset}>
-          Bookforge Studio
-        </button>
-        <nav className="steps">
-          <span className={step === "upload" ? "active" : ""}>1. Source</span>
-          <span className={step === "select" ? "active" : document?.kind === "pdf" && book ? "" : "disabled"}>2. Select &amp; compare</span>
-          <span className={step === "edit" ? "active" : book ? "" : "disabled"}>3. Edit &amp; export</span>
-        </nav>
-        {document && (
-          <div className="header-doc">
-            {document.name}
-            {step !== "upload" && (
-              <button type="button" className="btn-ghost btn-small" onClick={reset}>
-                new document
-              </button>
-            )}
-          </div>
-        )}
-      </header>
-
-      <div className="app-body">
-        {step === "upload" && <Dropzone onFile={handleUpload} busy={busy !== null} />}
-
-        {step === "select" && document && (
-          <SelectScreen
-            document={document}
-            models={models}
-            pending={pendingModels}
-            onModelAction={handleModelAction}
-            selectedPages={selectedPages}
-            onSelectedPagesChange={setSelectedPages}
-            samplePage={samplePage}
-            onSamplePageChange={setSamplePage}
-            compareSelection={compareSelection}
-            onToggleCompareModel={(id) =>
-              setCompareSelection((s) => {
-                const next = new Set(s);
-                next.has(id) ? next.delete(id) : next.add(id);
-                return next;
-              })
-            }
-            comparison={comparison}
-            comparing={comparing}
-            onRunCompare={handleCompare}
-            convertModelId={convertModel}
-            onChooseConvertModel={setConvertModelId}
-            onConvert={handleConvert}
-            converting={converting}
-          />
-        )}
-
-        {step === "edit" && book && document && (
-          <EditorScreen
-            book={book}
-            onChange={handleBookChange}
-            documentId={document.id}
-            conversionId={conversionId}
-            issues={issues}
-            validated={validated}
-            onValidate={handleValidate}
-            onExportEpub={handleExport}
-            onDownloadJson={handleDownloadJson}
-            validating={validating}
-            exporting={exporting}
-          />
-        )}
-      </div>
-
-      {busy && <BusyOverlay title={busy.title} copy={busy.copy} />}
-      {toast && <Toast message={toast.message} tone={toast.tone} />}
-    </div>
-  );
+    if (since === null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  return since === null ? 0 : Math.max(0, now - since);
 }
 
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const a = window.document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+export default function App() {
+  const [model, setModel] = useState<ModelStatus | null>(null);
+  const [hardware, setHardware] = useState<Hardware | null>(null);
+  const [installStartedAt, setInstallStartedAt] = useState<number | null>(null);
+  const [installLog, setInstallLog] = useState<string[]>([]);
+
+  const [doc, setDoc] = useState<Doc | null>(null);
+  const [reading, setReading] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [meta, setMeta] = useState<Meta>({ title: "", author: "", language: "en" });
+
+  const [testPage, setTestPage] = useState(1);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const [job, setJob] = useState<Omit<Job, "elapsedMs"> | null>(null);
+  const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
+  const [stats, setStats] = useState<ConvertStats | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const [error, setError] = useState<string | null>(null);
+
+  const installElapsed = useElapsed(installStartedAt);
+  const jobElapsed = useElapsed(jobStartedAt);
+
+  const refresh = () =>
+    api.getStatus().then(
+      (status) => {
+        setModel(status.model);
+        setHardware(status.hardware);
+      },
+      (e) => fail(e),
+    );
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  function fail(problem: unknown) {
+    setError(problem instanceof Error ? problem.message : String(problem));
+  }
+
+  async function install() {
+    setInstallLog([]);
+    setInstallStartedAt(Date.now());
+    setError(null);
+    try {
+      for await (const event of api.installModel()) {
+        if (event.type === "log") setInstallLog((lines) => [...lines, event.line]);
+        else if (event.type === "error") fail(event.message);
+        else if (event.type === "done" && event.model) setModel(event.model);
+      }
+    } catch (e) {
+      fail(e);
+    } finally {
+      setInstallStartedAt(null);
+      void refresh();
+    }
+  }
+
+  async function modelAction(action: "unload" | "remove") {
+    try {
+      setModel((await api.modelAction(action)).model);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
+  async function addFile(file: File) {
+    setReading(true);
+    setError(null);
+    try {
+      const added = await api.addDocument(file);
+      setDoc(added);
+      setSelected(new Set(added.pages.filter((page) => page.verdict !== "no-text").map((page) => page.page)));
+      setMeta({ title: added.title, author: added.author, language: "en" });
+      setTestPage(added.suggestedPage);
+      setTestResult(null);
+      setStats(null);
+      setWarnings([]);
+    } catch (e) {
+      fail(e);
+    } finally {
+      setReading(false);
+    }
+  }
+
+  async function runTest() {
+    if (!doc) return;
+    setTesting(true);
+    setError(null);
+    try {
+      setTestResult(await api.testPage(doc.id, testPage));
+    } catch (e) {
+      fail(e);
+    } finally {
+      setTesting(false);
+      void refresh();
+    }
+  }
+
+  async function convert() {
+    if (!doc) return;
+    setStats(null);
+    setWarnings([]);
+    setError(null);
+    setJob({ stage: "Starting", done: 0, total: 0 });
+    setJobStartedAt(Date.now());
+    try {
+      for await (const event of api.convert(doc.id, { pages: [...selected], ...meta })) {
+        if (event.type === "stage") setJob((current) => ({ ...current!, stage: event.stage }));
+        else if (event.type === "progress")
+          setJob({ stage: event.stage, done: event.done, total: event.total });
+        else if (event.type === "error") fail(event.message);
+        else if (event.type === "done") {
+          setStats(event.stats ?? null);
+          setWarnings(event.warnings ?? []);
+        }
+      }
+    } catch (e) {
+      fail(e);
+    } finally {
+      setJob(null);
+      setJobStartedAt(null);
+      void refresh();
+    }
+  }
+
+  const projection = doc ? estimate(doc.pages, selected, testResult?.elapsedMs) : null;
+  const needsModel = projection !== null && projection.scanned > 0;
+  const installed = model?.installed === true;
+
+  return (
+    <div className="shell">
+      <header className="top">
+        <span className="brand">
+          OCR Compose<span className="accent">.</span>
+        </span>
+        <span className="tagline">PDF → a real, reflowable EPUB</span>
+      </header>
+
+      <main>
+        <ModelCard
+          model={model}
+          hardware={hardware}
+          installing={installStartedAt !== null}
+          log={installLog}
+          elapsedMs={installElapsed}
+          onInstall={install}
+          onUnload={() => void modelAction("unload")}
+          onRemove={() => void modelAction("remove")}
+        />
+
+        {doc ? (
+          <FileCard doc={doc} selected={selected} onSelected={setSelected} onReset={() => setDoc(null)} />
+        ) : (
+          <Dropzone onFile={(file) => void addFile(file)} busy={reading} />
+        )}
+
+        {doc && projection && needsModel && (
+          <TestCard
+            doc={doc}
+            page={testPage}
+            onPage={setTestPage}
+            result={testResult}
+            running={testing}
+            ready={installed}
+            onRun={() => void runTest()}
+            projectedMs={testResult ? projection.totalMs : null}
+          />
+        )}
+
+        {doc && projection && (
+          <ConvertCard
+            doc={doc}
+            meta={meta}
+            onMeta={setMeta}
+            estimate={projection}
+            ready={selected.size > 0 && (!needsModel || installed)}
+            blocked={
+              needsModel && !installed
+                ? "Some selected pages are scans, so they need the model. Install it above, or select only native-text pages."
+                : projection.totalMs === null
+                  ? "Read one page above to learn this machine's speed and get a real time estimate."
+                  : null
+            }
+            job={job ? { ...job, elapsedMs: jobElapsed } : null}
+            stats={stats}
+            warnings={warnings}
+            onConvert={() => void convert()}
+          />
+        )}
+      </main>
+
+      {error && (
+        <div className="toast" role="alert">
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="dismiss">
+            ×
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }

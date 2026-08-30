@@ -1,110 +1,101 @@
-import type { Book, ValidationIssue } from "../../src/contract";
-import type { ModelInfo } from "../../src/models/registry";
+import type { Block } from "../../src/contract";
+import type { ModelStatus } from "../../src/models/registry";
 import type { OcrBlock } from "../../src/pdf/ocr";
 import type { TextLayerVerdict } from "../../src/pdf/textlayer";
 
-export type { Book, Block, Footnote, ValidationIssue } from "../../src/contract";
-export type { ModelInfo, ModelCapability, ModelSource } from "../../src/models/registry";
+export type { Block } from "../../src/contract";
+export type { ModelStatus } from "../../src/models/registry";
 export type { OcrBlock } from "../../src/pdf/ocr";
 export type { TextLayerVerdict } from "../../src/pdf/textlayer";
 
-export type PageReport = {
-  page: number;
-  verdict: TextLayerVerdict;
-  chars: number;
-  imageCoverage: number;
-  garble: number;
-};
+export type PageReport = { page: number; verdict: TextLayerVerdict; chars: number; imageCoverage: number; garble: number };
 
-export type DocumentInfo = {
+export type Hardware = { cpu: string; cores: number; memoryBytes: number; platform: string };
+
+export type Doc = {
   id: string;
   name: string;
-  kind: "pdf" | "epub";
+  sizeBytes: number;
   pageCount: number;
   pages: PageReport[];
-  counts?: Record<TextLayerVerdict, number>;
-  suggestedPage: number | null;
-  title?: string;
-  author?: string;
+  counts: Record<TextLayerVerdict, number>;
+  suggestedPage: number;
+  title: string;
+  author: string;
 };
 
-export type CompareResult = {
-  modelId: string;
-  ok: boolean;
-  elapsedMs: number;
-  blocks?: OcrBlock[];
-  contractBlocks?: unknown[];
-  error?: string;
+export type TestResult = { page: number; elapsedMs: number; regions: OcrBlock[]; blocks: Block[] };
+
+export type ConvertStats = {
+  blocks: number;
+  footnotes: number;
+  epubBytes: number;
+  counts: Record<TextLayerVerdict, number>;
 };
 
-class ApiError extends Error {
-  issues?: ValidationIssue[];
-}
+export type JobEvent =
+  | { type: "log"; line: string }
+  | { type: "stage"; stage: string }
+  | { type: "progress"; stage: string; done: number; total: number }
+  | { type: "done"; message?: string; model?: ModelStatus; stats?: ConvertStats; warnings?: string[] }
+  | { type: "error"; message: string };
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, options);
-  const type = response.headers.get("content-type") ?? "";
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
   if (!response.ok) {
-    const problem = type.includes("json") ? await response.json() : { error: await response.text() };
-    const error = new ApiError(problem.error || `Request failed (${response.status})`);
-    error.issues = problem.issues;
-    throw error;
+    const problem = await response.json().catch(() => ({ error: `Request failed (${response.status})` }));
+    throw new Error(problem.error ?? `Request failed (${response.status})`);
   }
-  return (type.includes("json") ? response.json() : response.blob()) as Promise<T>;
+  return response.json() as Promise<T>;
 }
 
-const postJson = <T>(path: string, value: unknown): Promise<T> =>
-  api<T>(path, {
+/** Consumes a server job stream, one JSON event at a time, as it happens. */
+async function* jobEvents(path: string, body?: unknown): AsyncGenerator<JobEvent> {
+  const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
+    body: JSON.stringify(body ?? {}),
   });
+  if (!response.body) throw new Error("the server closed the connection");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() ?? "";
+    for (const part of parts) if (part.startsWith("data: ")) yield JSON.parse(part.slice(6)) as JobEvent;
+  }
+}
 
-export const listModels = () => api<{ models: ModelInfo[] }>("/api/models");
+export const getStatus = () => request<{ model: ModelStatus; hardware: Hardware }>("/api/status");
 
-export type ModelAction = "install" | "unload" | "remove";
+export const installModel = () => jobEvents("/api/model/install");
 
-export const runModelAction = (id: string, action: ModelAction) =>
-  api<{ message: string; models: ModelInfo[] }>(`/api/models/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+export const modelAction = (action: "unload" | "remove") =>
+  request<{ message: string; model: ModelStatus }>(`/api/model/${action}`, { method: "POST" });
 
-export async function uploadDocument(file: File): Promise<
-  | { document: DocumentInfo; book?: undefined; warnings?: undefined }
-  | { document: DocumentInfo; book: Book; warnings: string[] }
-> {
-  return api("/api/documents", {
+export const addDocument = (file: File) =>
+  request<Doc>("/api/documents", {
     method: "POST",
-    headers: { "x-bookforge-filename": encodeURIComponent(file.name) },
+    headers: { "x-ocr-compose-filename": encodeURIComponent(file.name) },
     body: file,
   });
-}
 
-export const pageImageUrl = (documentId: string, page: number, scale = 1) =>
-  `/api/documents/${documentId}/pages/${page}.png?scale=${scale}`;
+export const pageImage = (id: string, page: number, scale = 1) => `/api/documents/${id}/pages/${page}.png?scale=${scale}`;
 
-export const assetUrl = (documentId: string, path: string, conversionId?: string) =>
-  `/api/documents/${documentId}/assets/${path.split("/").map(encodeURIComponent).join("/")}` +
-  (conversionId ? `?conversionId=${encodeURIComponent(conversionId)}` : "");
-
-export const compareModels = (documentId: string, page: number, modelIds: string[]) =>
-  postJson<{ page: number; results: CompareResult[] }>(`/api/documents/${documentId}/compare`, { page, modelIds });
-
-export const convertDocument = (
-  documentId: string,
-  request: { pages: number[]; modelId?: string; title?: string; author?: string; language?: string },
-) =>
-  postJson<{
-    conversionId: string;
-    book: Book;
-    warnings: string[];
-    report: { counts: Record<TextLayerVerdict, number>; pages: PageReport[] };
-  }>(`/api/documents/${documentId}/convert`, request);
-
-export const validateBook = (book: unknown) => postJson<{ issues: ValidationIssue[] }>("/api/validate", { book });
-
-export async function exportEpub(documentId: string, book: unknown, conversionId?: string): Promise<Blob> {
-  return api<Blob>("/api/export/epub", {
+export const testPage = (id: string, page: number) =>
+  request<TestResult>(`/api/documents/${id}/test`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ documentId, conversionId, book }),
+    body: JSON.stringify({ page }),
   });
-}
+
+export const convert = (
+  id: string,
+  request: { pages: number[]; title: string; author: string; language: string },
+) => jobEvents(`/api/documents/${id}/convert`, request);
+
+export const downloadUrl = (id: string, what: "epub" | "book.json") => `/api/documents/${id}/${what}`;

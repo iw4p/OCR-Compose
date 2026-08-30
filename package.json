@@ -1,6 +1,34 @@
 {
-  "name": "bookforge",
+  "name": "ocr-compose",
   "version": "0.1.0",
+  "description": "Turn a scanned or native PDF into a real, reflowable EPUB — local OCR, no uploads.",
+  "keywords": [
+    "ocr",
+    "pdf",
+    "epub",
+    "paddleocr",
+    "pdf-to-epub",
+    "document-ai",
+    "accessibility",
+    "ebook"
+  ],
+  "homepage": "https://github.com/iw4p/OCR-Compose#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iw4p/OCR-Compose.git"
+  },
+  "bugs": {
+    "url": "https://github.com/iw4p/OCR-Compose/issues"
+  },
+  "license": "MIT",
+  "author": "Nima Akbarzadeh (https://github.com/iw4p)",
+  "type": "module",
+  "bin": {
+    "ocr-compose": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "vitest run",
     "build": "tsc -p .",
@@ -8,10 +36,6 @@
     "studio:dev": "concurrently -k -n api,web -c blue,green \"tsx src/cli.ts studio\" \"vite --config studio/vite.config.ts\"",
     "studio:build": "vite build --config studio/vite.config.ts"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
-  "description": "Make a real EPUB from a PDF",
   "dependencies": {
     "fast-xml-parser": "^5.11.0",
     "jszip": "^3.10.1",
@@ -30,9 +54,5 @@
     "typescript": "^7.0.2",
     "vite": "8.2.2",
     "vitest": "^4.1.11"
-  },
-  "type": "module",
-  "bin": {
-    "bookforge": "dist/cli.js"
   }
 }
