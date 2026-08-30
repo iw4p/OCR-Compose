@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Hardware, ModelStatus } from "../api";
 import { formatBytes, formatClock } from "../format";
 
@@ -21,6 +21,9 @@ export function ModelCard({
   onUnload: () => void;
   onRemove: () => void;
 }) {
+  // Uninstalling deletes gigabytes that take minutes to fetch again, so it is
+  // never one click away.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
@@ -47,11 +50,28 @@ export function ModelCard({
                 free memory
               </button>
             )}
-            {model.source === "managed" && (
-              <button type="button" className="btn ghost danger" onClick={onRemove}>
-                uninstall
-              </button>
-            )}
+            {model.source === "managed" &&
+              (confirmingRemove ? (
+                <>
+                  <button type="button" className="btn ghost" onClick={() => setConfirmingRemove(false)}>
+                    keep it
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost danger"
+                    onClick={() => {
+                      setConfirmingRemove(false);
+                      onRemove();
+                    }}
+                  >
+                    delete {formatBytes(model.diskBytes)} from disk
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="btn ghost danger" onClick={() => setConfirmingRemove(true)}>
+                  uninstall
+                </button>
+              ))}
           </div>
         )}
       </header>

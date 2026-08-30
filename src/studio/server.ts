@@ -1,3 +1,6 @@
+// The Studio's local HTTP API. Everything below is one of three things: an
+// HTTP helper, a request schema, or a handler. Routing is a table at the
+// bottom, so adding a route never means editing a chain of conditionals.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { cpus, totalmem } from "node:os";
@@ -5,15 +8,18 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
-import type { Block, Book } from "../contract.js";
+import { z } from "zod";
 import { writeEpub } from "../epub/write.js";
 import { installModel, modelStatus, removeModel, unloadModel, withModel } from "../models/registry.js";
 import { extractPdf, renderPagePng } from "../pdf/extract.js";
-import { ocrBlocksToBookBlocks, type OcrBlock } from "../pdf/ocr.js";
+import { ocrBlocksToBookBlocks } from "../pdf/ocr.js";
 import { OCR_SCALE, pdfToBook } from "../pdf/pdf.js";
 import { textlayer, type PageReport } from "../pdf/textlayer.js";
+import type { Book } from "../contract.js";
 
-type Session = {
+// ---------------------------------------------------------------- state
+
+type Document = {
   id: string;
   name: string;
   bytes: Uint8Array;
@@ -22,19 +28,37 @@ type Session = {
   epub?: Uint8Array;
 };
 
-const sessions = new Map<string, Session>();
-const staticRoot = fileURLToPath(new URL("../../studio/dist/", import.meta.url));
+/**
+ * A document holds a whole PDF — and later its EPUB — in memory, so only the
+ * few most recent are kept alive. A local tool converts one book at a time.
+ */
+const MAX_DOCUMENTS = 3;
+const documents = new Map<string, Document>();
 
-const contentTypes: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
+const remember = (document: Document) => {
+  documents.set(document.id, document);
+  for (const id of [...documents.keys()].slice(0, -MAX_DOCUMENTS)) documents.delete(id);
 };
 
-const json = (res: ServerResponse, status: number, value: unknown) => {
+const staticRoot = fileURLToPath(new URL("../../studio/dist/", import.meta.url));
+
+// ---------------------------------------------------------------- http
+
+/** An error with the status it deserves. Anything else is a 500. */
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+const badRequest = (message: string) => new HttpError(400, message);
+const notFound = (message: string) => new HttpError(404, message);
+
+const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+const sendJson = (res: ServerResponse, status: number, value: unknown) => {
   const body = JSON.stringify(value);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -44,7 +68,7 @@ const json = (res: ServerResponse, status: number, value: unknown) => {
   res.end(body);
 };
 
-const bytes = (res: ServerResponse, value: Uint8Array, type: string, filename?: string) => {
+const sendBytes = (res: ServerResponse, value: Uint8Array, type: string, filename?: string) => {
   res.writeHead(200, {
     "content-type": type,
     "content-length": value.byteLength,
@@ -53,37 +77,63 @@ const bytes = (res: ServerResponse, value: Uint8Array, type: string, filename?: 
   res.end(value);
 };
 
-/** One JSON event per line, so a long job can report progress while it runs. */
-const stream = (res: ServerResponse) => {
-  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
-  return (event: unknown) => res.write(`data: ${JSON.stringify(event)}\n\n`);
-};
-
-/** Runs a streaming job, reporting a failure as the stream's last event. */
+/**
+ * A long job answers with a stream of JSON events rather than one response at
+ * the end, which is what makes honest progress possible. The whole job runs
+ * inside, validation included: once this is entered every outcome — including
+ * a rejected request — reaches the client as an event, never as a status code
+ * the client is no longer listening for.
+ */
 const streamed = async (res: ServerResponse, job: (send: (event: unknown) => void) => Promise<void>) => {
-  const send = stream(res);
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
+  const send = (event: unknown) => void res.write(`data: ${JSON.stringify(event)}\n\n`);
   try {
     await job(send);
   } catch (error) {
-    send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    send({ type: "error", message: message(error) });
   }
   res.end();
 };
 
-const readBody = async (req: IncomingMessage, limit = 512 * 1024 * 1024): Promise<Uint8Array> => {
+const readBody = async (req: IncomingMessage, limit: number): Promise<Uint8Array> => {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += value.length;
-    if (total > limit) throw new Error("upload is larger than 512 MB");
+    if (total > limit) throw new HttpError(413, `upload is larger than ${Math.round(limit / 1024 ** 2)} MB`);
     chunks.push(value);
   }
   return new Uint8Array(Buffer.concat(chunks));
 };
 
-const readJson = async <T>(req: IncomingMessage): Promise<T> =>
-  JSON.parse(new TextDecoder().decode(await readBody(req, 1024 * 1024))) as T;
+const UPLOAD_LIMIT = 512 * 1024 * 1024;
+
+/** Request bodies are parsed, never trusted: a bad shape is a 400, not a crash. */
+const readJson = async <T>(req: IncomingMessage, schema: z.ZodType<T>): Promise<T> => {
+  const raw = await readBody(req, 1024 * 1024);
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(raw));
+  } catch {
+    throw badRequest("request body is not valid JSON");
+  }
+  const parsed = schema.safeParse(value);
+  if (!parsed.success)
+    throw badRequest(parsed.error.issues.map((issue) => `${issue.path.join(".") || "body"}: ${issue.message}`).join("; "));
+  return parsed.data;
+};
+
+const TestRequest = z.object({ page: z.number().int().positive() });
+
+const ConvertRequest = z.object({
+  pages: z.array(z.number().int().positive()).min(1, "select at least one page"),
+  title: z.string().optional(),
+  author: z.string().optional(),
+  language: z.string().optional(),
+});
+
+// ---------------------------------------------------------------- domain
 
 /** A page worth testing on: prefer a scanned, text-heavy page near the middle. */
 const suggestedPage = (reports: PageReport[]): number => {
@@ -92,17 +142,7 @@ const suggestedPage = (reports: PageReport[]): number => {
     (report.verdict === "scanned" ? 100 : 0) +
     Math.min(report.chars, 1200) / 120 -
     Math.abs(report.page - middle) / Math.max(1, reports.length);
-  return (
-    reports
-      .filter((report) => report.verdict !== "no-text")
-      .sort((a, b) => score(b) - score(a))[0]?.page ?? 1
-  );
-};
-
-const session = (id: string): Session => {
-  const found = sessions.get(id);
-  if (!found) throw new Error("this document is no longer loaded; add the file again");
-  return found;
+  return reports.filter((report) => report.verdict !== "no-text").sort((a, b) => score(b) - score(a))[0]?.page ?? 1;
 };
 
 const hardware = () => {
@@ -115,164 +155,198 @@ const hardware = () => {
   };
 };
 
-const api = async (req: IncomingMessage, res: ServerResponse, url: URL): Promise<boolean> => {
-  const post = req.method === "POST";
-  const get = req.method === "GET";
+// ---------------------------------------------------------------- handlers
 
-  if (get && url.pathname === "/api/status") {
-    json(res, 200, { model: await modelStatus(), hardware: hardware() });
-    return true;
-  }
+type Ctx = { req: IncomingMessage; res: ServerResponse; url: URL; params: Record<string, string> };
+type Handler = (ctx: Ctx) => Promise<void>;
 
-  if (post && url.pathname === "/api/model/install") {
-    await streamed(res, async (send) => {
-      const message = await installModel((line) => send({ type: "log", line }));
-      send({ type: "done", message, model: await modelStatus() });
-    });
-    return true;
-  }
-
-  if (post && (url.pathname === "/api/model/unload" || url.pathname === "/api/model/remove")) {
-    const message = url.pathname.endsWith("remove") ? await removeModel() : await unloadModel();
-    json(res, 200, { message, model: await modelStatus() });
-    return true;
-  }
-
-  if (post && url.pathname === "/api/documents") {
-    const file = await readBody(req);
-    if (file.byteLength === 0) throw new Error("that file is empty");
-    const name = decodeURIComponent(String(req.headers["x-ocr-compose-filename"] ?? "book.pdf")).replace(/[\/\\]/g, "-");
-    const extraction = extractPdf(file);
-    const { reports, counts } = textlayer(extraction.pages);
-    const id = randomUUID();
-    sessions.set(id, { id, name, bytes: file, reports });
-    json(res, 200, {
-      id,
-      name,
-      sizeBytes: file.byteLength,
-      pageCount: extraction.pages.length,
-      pages: reports,
-      counts,
-      suggestedPage: suggestedPage(reports),
-      title: extraction.meta.title ?? name.replace(/\.pdf$/i, ""),
-      author: extraction.meta.author ?? "",
-    });
-    return true;
-  }
-
-  const pageMatch = /^\/api\/documents\/([^/]+)\/pages\/(\d+)\.png$/.exec(url.pathname);
-  if (get && pageMatch) {
-    const doc = session(pageMatch[1]!);
-    const page = Number(pageMatch[2]);
-    if (!doc.reports.some((report) => report.page === page)) throw new Error("page is out of range");
-    const scale = Math.min(3, Math.max(0.2, Number(url.searchParams.get("scale") ?? 1)));
-    bytes(res, renderPagePng(doc.bytes, page, scale), "image/png");
-    return true;
-  }
-
-  // The test run: recognize one page for real (never from cache) so its
-  // duration is an honest per-page cost to project the whole book from. It
-  // renders at the conversion's own scale, so the timing matches the work the
-  // conversion will do and the conversion reuses this page's cached result.
-  const testMatch = /^\/api\/documents\/([^/]+)\/test$/.exec(url.pathname);
-  if (post && testMatch) {
-    const doc = session(testMatch[1]!);
-    const { page } = await readJson<{ page: number }>(req);
-    if (!doc.reports.some((report) => report.page === page)) throw new Error("page is out of range");
-    const png = renderPagePng(doc.bytes, page, OCR_SCALE);
-    let started = performance.now();
-    const raw = await withModel((engine) => {
-      started = performance.now(); // loading weights is a one-time cost, not per page
-      return engine.recognize(png, [], { fresh: true });
-    });
-    json(res, 200, {
-      page,
-      elapsedMs: Math.round(performance.now() - started),
-      regions: raw as OcrBlock[],
-      blocks: ocrBlocksToBookBlocks(raw, page) as Block[],
-    });
-    return true;
-  }
-
-  const convertMatch = /^\/api\/documents\/([^/]+)\/convert$/.exec(url.pathname);
-  if (post && convertMatch) {
-    const doc = session(convertMatch[1]!);
-    const request = await readJson<{ pages: number[]; title?: string; author?: string; language?: string }>(req);
-    const pages = [...new Set(request.pages)].sort((a, b) => a - b);
-    if (pages.length === 0) throw new Error("select at least one page");
-    const needsOcr = doc.reports.some((report) => pages.includes(report.page) && report.verdict === "scanned");
-    await streamed(res, async (send) => {
-      send({ type: "stage", stage: needsOcr ? "Loading the model" : "Reading pages" });
-      const options = {
-        pages,
-        ...(request.title && { title: request.title }),
-        ...(request.author && { author: request.author }),
-        language: request.language || "en",
-        onProgress: (done: number, total: number) =>
-          send({ type: "progress", stage: "Recognizing scanned pages", done, total }),
-      };
-      const result = needsOcr
-        ? await withModel((engine) => pdfToBook(doc.bytes, { ...options, ocr: engine }))
-        : await pdfToBook(doc.bytes, options);
-      send({ type: "stage", stage: "Packing the EPUB" });
-      doc.book = result.book;
-      doc.epub = await writeEpub(result.book, result.assets);
-      send({
-        type: "done",
-        stats: {
-          blocks: result.book.content.length,
-          footnotes: Object.keys(result.book.footnotes).length,
-          epubBytes: doc.epub.byteLength,
-          counts: result.report.counts,
-        },
-        warnings: result.warnings,
-      });
-    });
-    return true;
-  }
-
-  const downloadMatch = /^\/api\/documents\/([^/]+)\/(epub|book\.json)$/.exec(url.pathname);
-  if (get && downloadMatch) {
-    const doc = session(downloadMatch[1]!);
-    const base = doc.name.replace(/\.pdf$/i, "");
-    if (downloadMatch[2] === "epub") {
-      if (!doc.epub) throw new Error("nothing converted yet");
-      bytes(res, doc.epub, "application/epub+zip", `${base}.epub`);
-    } else {
-      if (!doc.book) throw new Error("nothing converted yet");
-      const body = new TextEncoder().encode(JSON.stringify(doc.book, null, 2) + "\n");
-      bytes(res, body, "application/json", `${base}.book.json`);
-    }
-    return true;
-  }
-
-  return false;
+const documentOf = ({ params }: Ctx): Document => {
+  const document = documents.get(params.id ?? "");
+  if (!document) throw notFound("this document is no longer loaded; add the file again");
+  return document;
 };
 
-const staticFile = async (res: ServerResponse, pathname: string) => {
-  const requested = pathname === "/" ? "index.html" : pathname.slice(1);
-  const path = normalize(join(staticRoot, requested));
-  if (!path.startsWith(staticRoot)) {
-    json(res, 403, { error: "forbidden" });
-    return;
+const pageOf = (document: Document, page: number): number => {
+  if (!document.reports.some((report) => report.page === page)) throw badRequest(`page ${page} is out of range`);
+  return page;
+};
+
+const getStatus: Handler = async ({ res }) => {
+  sendJson(res, 200, { model: await modelStatus(), hardware: hardware() });
+};
+
+const postInstall: Handler = async ({ res }) =>
+  await streamed(res, async (send) => {
+    const done = await installModel((line) => send({ type: "log", line }));
+    send({ type: "done", message: done });
+  });
+
+const postUnload: Handler = async ({ res }) => {
+  const done = await unloadModel();
+  sendJson(res, 200, { message: done, model: await modelStatus() });
+};
+
+const postRemove: Handler = async ({ res }) => {
+  const done = await removeModel();
+  sendJson(res, 200, { message: done, model: await modelStatus() });
+};
+
+const postDocument: Handler = async ({ req, res }) => {
+  const file = await readBody(req, UPLOAD_LIMIT);
+  if (file.byteLength === 0) throw badRequest("that file is empty");
+  const name = decodeURIComponent(String(req.headers["x-ocr-compose-filename"] ?? "book.pdf")).replace(/[/\\]/g, "-");
+  const extraction = extractPdf(file);
+  const { reports, counts } = textlayer(extraction.pages);
+  const document: Document = { id: randomUUID(), name, bytes: file, reports };
+  remember(document);
+  sendJson(res, 200, {
+    id: document.id,
+    name,
+    sizeBytes: file.byteLength,
+    pageCount: extraction.pages.length,
+    pages: reports,
+    counts,
+    suggestedPage: suggestedPage(reports),
+    title: extraction.meta.title ?? name.replace(/\.pdf$/i, ""),
+    author: extraction.meta.author ?? "",
+  });
+};
+
+const getPageImage: Handler = async (ctx) => {
+  const document = documentOf(ctx);
+  const page = pageOf(document, Number(ctx.params.page));
+  const scale = Math.min(3, Math.max(0.2, Number(ctx.url.searchParams.get("scale") ?? 1)));
+  sendBytes(ctx.res, renderPagePng(document.bytes, page, scale), "image/png");
+};
+
+/**
+ * Recognize one page for real, never from cache, so its duration is an honest
+ * per-page cost to project the whole book from. It renders at the conversion's
+ * own scale, so the timing matches the work the conversion will do — and the
+ * conversion then reuses this page's cached result instead of redoing it.
+ */
+const postTest: Handler = async (ctx) => {
+  const document = documentOf(ctx);
+  const page = pageOf(document, (await readJson(ctx.req, TestRequest)).page);
+  const png = renderPagePng(document.bytes, page, OCR_SCALE);
+  let started = performance.now();
+  const regions = await withModel((engine) => {
+    started = performance.now(); // loading weights is a one-time cost, not a per-page one
+    return engine.recognize(png, [], { fresh: true });
+  });
+  sendJson(ctx.res, 200, {
+    page,
+    elapsedMs: Math.round(performance.now() - started),
+    regions,
+    blocks: ocrBlocksToBookBlocks(regions, page),
+  });
+};
+
+const postConvert: Handler = async (ctx) =>
+  await streamed(ctx.res, async (send) => {
+    const document = documentOf(ctx);
+    const request = await readJson(ctx.req, ConvertRequest);
+    const pages = [...new Set(request.pages)].sort((a, b) => a - b);
+    const needsOcr = document.reports.some((report) => pages.includes(report.page) && report.verdict === "scanned");
+
+    send({ type: "stage", stage: needsOcr ? "Loading the model" : "Reading pages" });
+    const options = {
+      pages,
+      ...(request.title && { title: request.title }),
+      ...(request.author && { author: request.author }),
+      language: request.language || "en",
+      onProgress: (done: number, total: number) =>
+        send({ type: "progress", stage: "Recognizing scanned pages", done, total }),
+    };
+    const result = needsOcr
+      ? await withModel((engine) => pdfToBook(document.bytes, { ...options, ocr: engine }))
+      : await pdfToBook(document.bytes, options);
+
+    send({ type: "stage", stage: "Packing the EPUB" });
+    document.book = result.book;
+    document.epub = await writeEpub(result.book, result.assets);
+    send({
+      type: "done",
+      stats: {
+        blocks: result.book.content.length,
+        footnotes: Object.keys(result.book.footnotes).length,
+        epubBytes: document.epub.byteLength,
+        counts: result.report.counts,
+      },
+      warnings: result.warnings,
+    });
+  });
+
+const getEpub: Handler = async (ctx) => {
+  const document = documentOf(ctx);
+  if (!document.epub) throw notFound("nothing converted yet");
+  sendBytes(ctx.res, document.epub, "application/epub+zip", `${document.name.replace(/\.pdf$/i, "")}.epub`);
+};
+
+const getBookJson: Handler = async (ctx) => {
+  const document = documentOf(ctx);
+  if (!document.book) throw notFound("nothing converted yet");
+  const body = new TextEncoder().encode(JSON.stringify(document.book, null, 2) + "\n");
+  sendBytes(ctx.res, body, "application/json", `${document.name.replace(/\.pdf$/i, "")}.book.json`);
+};
+
+// ---------------------------------------------------------------- routing
+
+const DOC = String.raw`(?<id>[0-9a-f-]{36})`;
+
+const routes: { method: string; path: RegExp; handler: Handler }[] = [
+  { method: "GET", path: /^\/api\/status$/, handler: getStatus },
+  { method: "POST", path: /^\/api\/model\/install$/, handler: postInstall },
+  { method: "POST", path: /^\/api\/model\/unload$/, handler: postUnload },
+  { method: "POST", path: /^\/api\/model\/remove$/, handler: postRemove },
+  { method: "POST", path: /^\/api\/documents$/, handler: postDocument },
+  { method: "GET", path: new RegExp(String.raw`^/api/documents/${DOC}/pages/(?<page>\d+)\.png$`), handler: getPageImage },
+  { method: "POST", path: new RegExp(String.raw`^/api/documents/${DOC}/test$`), handler: postTest },
+  { method: "POST", path: new RegExp(String.raw`^/api/documents/${DOC}/convert$`), handler: postConvert },
+  { method: "GET", path: new RegExp(String.raw`^/api/documents/${DOC}/epub$`), handler: getEpub },
+  { method: "GET", path: new RegExp(String.raw`^/api/documents/${DOC}/book\.json$`), handler: getBookJson },
+];
+
+const match = (method: string, pathname: string) => {
+  for (const route of routes) {
+    if (route.method !== method) continue;
+    const found = route.path.exec(pathname);
+    if (found) return { handler: route.handler, params: found.groups ?? {} };
   }
-  try {
-    bytes(res, new Uint8Array(await readFile(path)), contentTypes[extname(path)] ?? "application/octet-stream");
-  } catch {
-    json(res, 404, { error: "not found" });
-  }
+  return null;
+};
+
+const sendStaticFile = async (res: ServerResponse, pathname: string) => {
+  const path = normalize(join(staticRoot, pathname === "/" ? "index.html" : pathname.slice(1)));
+  if (!path.startsWith(staticRoot)) throw new HttpError(403, "forbidden");
+  const contentTypes: Record<string, string> = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+  };
+  const file = await readFile(path).catch(() => {
+    throw notFound("not found");
+  });
+  sendBytes(res, new Uint8Array(file), contentTypes[extname(path)] ?? "application/octet-stream");
 };
 
 export async function startStudio(options: { host?: string; port?: number } = {}) {
   const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     try {
-      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-      if (url.pathname.startsWith("/api/")) {
-        if (!(await api(req, res, url))) json(res, 404, { error: "API route not found" });
-      } else await staticFile(res, url.pathname);
+      if (!url.pathname.startsWith("/api/")) return await sendStaticFile(res, url.pathname);
+      const route = match(req.method ?? "GET", url.pathname);
+      if (!route) throw notFound(`no API route for ${req.method} ${url.pathname}`);
+      await route.handler({ req, res, url, params: route.params });
     } catch (error) {
-      if (!res.headersSent) json(res, 400, { error: error instanceof Error ? error.message : String(error) });
-      else res.end();
+      // A streaming handler has already reported its own failure as an event.
+      if (res.headersSent) return void res.end();
+      sendJson(res, error instanceof HttpError ? error.status : 500, { error: message(error) });
     }
   });
   await new Promise<void>((resolve, reject) => {

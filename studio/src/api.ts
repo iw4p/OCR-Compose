@@ -37,15 +37,18 @@ export type JobEvent =
   | { type: "log"; line: string }
   | { type: "stage"; stage: string }
   | { type: "progress"; stage: string; done: number; total: number }
-  | { type: "done"; message?: string; model?: ModelStatus; stats?: ConvertStats; warnings?: string[] }
+  | { type: "done"; message?: string; stats?: ConvertStats; warnings?: string[] }
   | { type: "error"; message: string };
+
+const errorFrom = async (response: Response): Promise<string> => {
+  const fallback = `Request failed (${response.status})`;
+  const problem = await response.json().catch(() => null);
+  return problem?.error ?? fallback;
+};
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
-  if (!response.ok) {
-    const problem = await response.json().catch(() => ({ error: `Request failed (${response.status})` }));
-    throw new Error(problem.error ?? `Request failed (${response.status})`);
-  }
+  if (!response.ok) throw new Error(await errorFrom(response));
   return response.json() as Promise<T>;
 }
 
@@ -56,6 +59,9 @@ async function* jobEvents(path: string, body?: unknown): AsyncGenerator<JobEvent
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
+  // A job that failed before it could stream answers with a status, not events:
+  // without this the loop below would just end and the failure would vanish.
+  if (!response.ok) throw new Error(await errorFrom(response));
   if (!response.body) throw new Error("the server closed the connection");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -95,7 +101,7 @@ export const testPage = (id: string, page: number) =>
 
 export const convert = (
   id: string,
-  request: { pages: number[]; title: string; author: string; language: string },
-) => jobEvents(`/api/documents/${id}/convert`, request);
+  options: { pages: number[]; title: string; author: string; language: string },
+) => jobEvents(`/api/documents/${id}/convert`, options);
 
 export const downloadUrl = (id: string, what: "epub" | "book.json") => `/api/documents/${id}/${what}`;

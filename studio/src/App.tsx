@@ -3,7 +3,8 @@ import * as api from "./api";
 import type { ConvertStats, Doc, Hardware, ModelStatus, TestResult } from "./api";
 import { estimate } from "./estimate";
 import { ModelCard } from "./components/ModelCard";
-import { Dropzone, FileCard } from "./components/FileCard";
+import { Dropzone } from "./components/Dropzone";
+import { FileCard } from "./components/FileCard";
 import { TestCard } from "./components/TestCard";
 import { ConvertCard, type Job, type Meta } from "./components/ConvertCard";
 
@@ -12,6 +13,7 @@ function useElapsed(since: number | null): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (since === null) return;
+    setNow(Date.now()); // else the first tick reads a clock left over from the last job
     const timer = window.setInterval(() => setNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, [since]);
@@ -68,7 +70,7 @@ export default function App() {
       for await (const event of api.installModel()) {
         if (event.type === "log") setInstallLog((lines) => [...lines, event.line]);
         else if (event.type === "error") fail(event.message);
-        else if (event.type === "done" && event.model) setModel(event.model);
+        else if (event.type === "done" && event.message) setInstallLog((lines) => [...lines, event.message!]);
       }
     } catch (e) {
       fail(e);
@@ -86,18 +88,25 @@ export default function App() {
     }
   }
 
+  /** Nothing measured about one document may survive into the next. */
+  function forgetDocument() {
+    setDoc(null);
+    setSelected(new Set());
+    setTestResult(null);
+    setStats(null);
+    setWarnings([]);
+  }
+
   async function addFile(file: File) {
     setReading(true);
     setError(null);
+    forgetDocument();
     try {
       const added = await api.addDocument(file);
       setDoc(added);
       setSelected(new Set(added.pages.filter((page) => page.verdict !== "no-text").map((page) => page.page)));
       setMeta({ title: added.title, author: added.author, language: "en" });
       setTestPage(added.suggestedPage);
-      setTestResult(null);
-      setStats(null);
-      setWarnings([]);
     } catch (e) {
       fail(e);
     } finally {
@@ -128,7 +137,7 @@ export default function App() {
     setJobStartedAt(Date.now());
     try {
       for await (const event of api.convert(doc.id, { pages: [...selected], ...meta })) {
-        if (event.type === "stage") setJob((current) => ({ ...current!, stage: event.stage }));
+        if (event.type === "stage") setJob((current) => ({ done: 0, total: 0, ...current, stage: event.stage }));
         else if (event.type === "progress")
           setJob({ stage: event.stage, done: event.done, total: event.total });
         else if (event.type === "error") fail(event.message);
@@ -172,7 +181,7 @@ export default function App() {
         />
 
         {doc ? (
-          <FileCard doc={doc} selected={selected} onSelected={setSelected} onReset={() => setDoc(null)} />
+          <FileCard doc={doc} selected={selected} onSelected={setSelected} onReset={forgetDocument} />
         ) : (
           <Dropzone onFile={(file) => void addFile(file)} busy={reading} />
         )}
