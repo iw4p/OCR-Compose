@@ -6,13 +6,18 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(value < 10 && power > 1 ? 1 : 0)} ${units[power]}`;
 }
 
-/** Rounded to the precision the number deserves: never "1h 03m 17s". */
+/**
+ * Rounded to the precision the number deserves: never "1h 03m 17s". Each unit
+ * is chosen after rounding the one below it, so nothing ever reads "60 sec" or
+ * "60 min" — those are a minute and an hour.
+ */
 export function formatDuration(ms: number): string {
-  const seconds = ms / 1000;
-  if (seconds < 1) return "under a second";
-  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} sec`;
-  const minutes = seconds / 60;
-  if (minutes < 60) return `${Math.round(minutes)} min`;
+  if (ms < 1000) return "under a second";
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return `${(ms / 1000).toFixed(1)} sec`;
+  if (seconds < 60) return `${seconds} sec`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
   const hours = Math.floor(minutes / 60);
   const rest = Math.round((minutes - hours * 60) / 5) * 5;
   return rest === 0 || rest === 60 ? `${rest === 60 ? hours + 1 : hours} h` : `${hours} h ${rest} min`;

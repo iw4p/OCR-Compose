@@ -1,28 +1,7 @@
-import type { Block, Doc, TestResult } from "../api";
+import type { Doc, TestResult } from "../api";
 import { pageImage } from "../api";
+import { describeBlock } from "../blocks";
 import { formatDuration } from "../format";
-
-/** What this block will actually be in the EPUB, and the text it carries. */
-function describe(block: Block): { kind: string; text: string } {
-  switch (block.type) {
-    case "heading":
-      return { kind: `h${block.level}`, text: block.text };
-    case "text":
-      return { kind: block.role ?? "paragraph", text: block.text };
-    case "quote":
-      return { kind: "quote", text: block.text };
-    case "image":
-      return { kind: "figure", text: block.caption ?? "(image, no caption)" };
-    case "table":
-      return block.rows
-        ? { kind: "table", text: `${block.rows.length} × ${block.rows[0]?.length ?? 0} cells` }
-        : { kind: "table", text: "kept as a picture — no grid parsed" };
-    case "formula":
-      return { kind: "formula", text: block.tex ?? "(image)" };
-    case "list":
-      return { kind: "list", text: `${block.items.length} items` };
-  }
-}
 
 export function TestCard({
   doc,
@@ -115,7 +94,7 @@ export function TestCard({
             <ol className="blocks">
               {result.blocks.length === 0 && <li className="dim">Nothing recognized on this page.</li>}
               {result.blocks.map((block, i) => {
-                const { kind, text } = describe(block);
+                const { kind, text } = describeBlock(block);
                 return (
                   <li key={i}>
                     <span className="kind">{kind}</span>

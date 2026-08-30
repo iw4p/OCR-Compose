@@ -1,17 +1,7 @@
 import { useState } from "react";
 import type { Doc } from "../api";
+import { allPages, pagesWithContent, parseRange, togglePage } from "../pages";
 import { formatBytes } from "../format";
-
-/** `1,3-5,9` → page numbers inside the document. Junk is ignored, not fatal. */
-function parseRange(input: string, max: number): Set<number> {
-  const pages = new Set<number>();
-  for (const part of input.split(",")) {
-    const match = /^\s*(\d+)\s*(?:-\s*(\d+)\s*)?$/.exec(part);
-    if (!match) continue;
-    for (let n = Number(match[1]); n <= Number(match[2] ?? match[1]); n++) if (n >= 1 && n <= max) pages.add(n);
-  }
-  return pages;
-}
 
 const VERDICTS = [
   { key: "native", label: "native text" },
@@ -31,12 +21,6 @@ export function FileCard({
   onReset: () => void;
 }) {
   const [range, setRange] = useState("");
-
-  const toggle = (page: number) => {
-    const next = new Set(selected);
-    if (!next.delete(page)) next.add(page);
-    onSelected(next);
-  };
 
   return (
     <section className="card">
@@ -71,12 +55,12 @@ export function FileCard({
 
       <div className="row">
         <div className="seg">
-          <button type="button" onClick={() => onSelected(new Set(doc.pages.map((p) => p.page)))}>
+          <button type="button" onClick={() => onSelected(allPages(doc.pages))}>
             all
           </button>
           <button
             type="button"
-            onClick={() => onSelected(new Set(doc.pages.filter((p) => p.verdict !== "no-text").map((p) => p.page)))}
+            onClick={() => onSelected(pagesWithContent(doc.pages))}
           >
             skip blanks
           </button>
@@ -108,7 +92,7 @@ export function FileCard({
             type="button"
             className={"page-cell " + page.verdict + (selected.has(page.page) ? " on" : "")}
             title={`page ${page.page} · ${page.verdict}`}
-            onClick={() => toggle(page.page)}
+            onClick={() => onSelected(togglePage(selected, page.page))}
           >
             {page.page}
           </button>

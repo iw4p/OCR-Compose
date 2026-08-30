@@ -1,30 +1,23 @@
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import * as api from "./api";
-import type { ConvertStats, Doc, Hardware, ModelStatus, TestResult } from "./api";
+import type { ConvertStats, Doc, TestResult } from "./api";
 import { estimate } from "./estimate";
+import { pagesWithContent } from "./pages";
+import { useElapsed } from "./useElapsed";
+import { useModel } from "./useModel";
 import { ModelCard } from "./components/ModelCard";
 import { Dropzone } from "./components/Dropzone";
 import { FileCard } from "./components/FileCard";
 import { TestCard } from "./components/TestCard";
 import { ConvertCard, type Job, type Meta } from "./components/ConvertCard";
 
-/** A clock that only runs while something long is happening. */
-function useElapsed(since: number | null): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (since === null) return;
-    setNow(Date.now()); // else the first tick reads a clock left over from the last job
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [since]);
-  return since === null ? 0 : Math.max(0, now - since);
-}
-
 export default function App() {
-  const [model, setModel] = useState<ModelStatus | null>(null);
-  const [hardware, setHardware] = useState<Hardware | null>(null);
-  const [installStartedAt, setInstallStartedAt] = useState<number | null>(null);
-  const [installLog, setInstallLog] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const fail = useCallback((problem: unknown) => {
+    setError(problem instanceof Error ? problem.message : String(problem));
+  }, []);
+
+  const model = useModel(fail);
 
   const [doc, setDoc] = useState<Doc | null>(null);
   const [reading, setReading] = useState(false);
@@ -37,59 +30,9 @@ export default function App() {
 
   const [job, setJob] = useState<Omit<Job, "elapsedMs"> | null>(null);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
+  const jobElapsed = useElapsed(jobStartedAt);
   const [stats, setStats] = useState<ConvertStats | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
-
-  const [error, setError] = useState<string | null>(null);
-
-  const installElapsed = useElapsed(installStartedAt);
-  const jobElapsed = useElapsed(jobStartedAt);
-
-  const refresh = () =>
-    api.getStatus().then(
-      (status) => {
-        setModel(status.model);
-        setHardware(status.hardware);
-      },
-      (e) => fail(e),
-    );
-
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  function fail(problem: unknown) {
-    setError(problem instanceof Error ? problem.message : String(problem));
-  }
-
-  async function install() {
-    setInstallLog([]);
-    setInstallStartedAt(Date.now());
-    setError(null);
-    try {
-      for await (const event of api.installModel()) {
-        if (event.type === "log") setInstallLog((lines) => [...lines, event.line]);
-        else if (event.type === "error") fail(event.message);
-        else if (event.type === "done") {
-          const summary = event.message;
-          if (summary) setInstallLog((lines) => [...lines, summary]);
-        }
-      }
-    } catch (e) {
-      fail(e);
-    } finally {
-      setInstallStartedAt(null);
-      void refresh();
-    }
-  }
-
-  async function modelAction(action: "unload" | "remove") {
-    try {
-      setModel((await api.modelAction(action)).model);
-    } catch (e) {
-      fail(e);
-    }
-  }
 
   /** Nothing measured about one document may survive into the next. */
   function forgetDocument() {
@@ -107,7 +50,7 @@ export default function App() {
     try {
       const added = await api.addDocument(file);
       setDoc(added);
-      setSelected(new Set(added.pages.filter((page) => page.verdict !== "no-text").map((page) => page.page)));
+      setSelected(pagesWithContent(added.pages));
       setMeta({ title: added.title, author: added.author, language: "en" });
       setTestPage(added.suggestedPage);
     } catch (e) {
@@ -127,7 +70,7 @@ export default function App() {
       fail(e);
     } finally {
       setTesting(false);
-      void refresh();
+      void model.refresh();
     }
   }
 
@@ -141,8 +84,7 @@ export default function App() {
     try {
       for await (const event of api.convert(doc.id, { pages: [...selected], ...meta })) {
         if (event.type === "stage") setJob((current) => ({ done: 0, total: 0, ...current, stage: event.stage }));
-        else if (event.type === "progress")
-          setJob({ stage: event.stage, done: event.done, total: event.total });
+        else if (event.type === "progress") setJob({ stage: event.stage, done: event.done, total: event.total });
         else if (event.type === "error") fail(event.message);
         else if (event.type === "done") {
           setStats(event.stats ?? null);
@@ -154,13 +96,12 @@ export default function App() {
     } finally {
       setJob(null);
       setJobStartedAt(null);
-      void refresh();
+      void model.refresh();
     }
   }
 
   const projection = doc ? estimate(doc.pages, selected, testResult?.elapsedMs) : null;
   const needsModel = projection !== null && projection.scanned > 0;
-  const installed = model?.installed === true;
 
   return (
     <div className="shell">
@@ -173,14 +114,14 @@ export default function App() {
 
       <main>
         <ModelCard
-          model={model}
-          hardware={hardware}
-          installing={installStartedAt !== null}
-          log={installLog}
-          elapsedMs={installElapsed}
-          onInstall={install}
-          onUnload={() => void modelAction("unload")}
-          onRemove={() => void modelAction("remove")}
+          model={model.status}
+          hardware={model.hardware}
+          installing={model.installing}
+          log={model.log}
+          elapsedMs={model.elapsedMs}
+          onInstall={() => void model.install()}
+          onUnload={model.unload}
+          onRemove={model.remove}
         />
 
         {doc ? (
@@ -196,7 +137,7 @@ export default function App() {
             onPage={setTestPage}
             result={testResult}
             running={testing}
-            ready={installed}
+            ready={model.installed}
             onRun={() => void runTest()}
             projectedMs={testResult ? projection.totalMs : null}
           />
@@ -208,9 +149,9 @@ export default function App() {
             meta={meta}
             onMeta={setMeta}
             estimate={projection}
-            ready={selected.size > 0 && (!needsModel || installed)}
+            ready={selected.size > 0 && (!needsModel || model.installed)}
             blocked={
-              needsModel && !installed
+              needsModel && !model.installed
                 ? "Some selected pages are scans, so they need the model. Install it above, or select only native-text pages."
                 : projection.totalMs === null
                   ? "Read one page above to learn this machine's speed and get a real time estimate."
