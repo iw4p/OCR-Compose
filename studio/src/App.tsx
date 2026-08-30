@@ -70,7 +70,10 @@ export default function App() {
       for await (const event of api.installModel()) {
         if (event.type === "log") setInstallLog((lines) => [...lines, event.line]);
         else if (event.type === "error") fail(event.message);
-        else if (event.type === "done" && event.message) setInstallLog((lines) => [...lines, event.message!]);
+        else if (event.type === "done") {
+          const summary = event.message;
+          if (summary) setInstallLog((lines) => [...lines, summary]);
+        }
       }
     } catch (e) {
       fail(e);

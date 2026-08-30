@@ -157,7 +157,7 @@ async function main(argv: string[]): Promise<number> {
         const studio = await startStudio({ port });
         console.log(`OCR Compose Studio: ${studio.url}`);
         await new Promise<void>((resolve) => {
-          const stop = () => studio.server.close(() => resolve());
+          const stop = () => void studio.app.close().then(resolve);
           process.once("SIGINT", stop);
           process.once("SIGTERM", stop);
         });

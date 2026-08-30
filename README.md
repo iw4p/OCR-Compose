@@ -206,7 +206,12 @@ src/
   pdf/ocr.ts       OCR adapter interface, block mapper, the Paddle engine
   pdf/pdf.ts       the front-end orchestrator
   models/          model install, removal and warm-engine lifecycle
-  studio/server.ts local Studio API and static app server
+  studio/          the local Studio server (Fastify)
+    server.ts      app assembly: plugins, error shape, static UI
+    routes/        one file per group of endpoints
+    documents.ts   the uploaded PDFs this process is holding
+    schemas.ts     every request shape the API accepts
+    stream.ts      the progress-event protocol long jobs answer with
   cli.ts           pdf / unpack / pack / validate
   *.test.ts        the tests live next to what they test
 studio/            the local drop → test → convert UI

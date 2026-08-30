@@ -18,7 +18,8 @@ npm run studio:dev
 ```
 
 This runs the Vite dev server (`studio/`, hot reload) against the local API
-(`src/studio/server.ts`). `npm run studio` builds the UI once and serves it
+(`src/studio/`, Fastify — see [docs/STUDIO.md](docs/STUDIO.md#api) before adding
+a route, especially a streaming one). `npm run studio` builds the UI once and serves it
 from the same Node process, which is what `ocr-compose studio` does in
 production.
 

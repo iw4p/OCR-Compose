@@ -1,27 +1,26 @@
 import { readFile } from "node:fs/promises";
-import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { startStudio } from "./server.js";
 
-let server: Server;
+let close: () => Promise<void>;
 let base = "";
 let pdf: Uint8Array;
 
 beforeAll(async () => {
   pdf = new Uint8Array(await readFile("corpus/pdf/frankenstein.pdf"));
   const studio = await startStudio({ port: 0 });
-  server = studio.server;
+  close = () => studio.app.close();
   base = studio.url;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+  await close();
 });
 
 const upload = async (name = "frankenstein.pdf") => {
   const response = await fetch(`${base}/api/documents`, {
     method: "POST",
-    headers: { "x-ocr-compose-filename": encodeURIComponent(name) },
+    headers: { "x-ocr-compose-filename": encodeURIComponent(name), "content-type": "application/pdf" },
     body: pdf,
   });
   expect(response.status).toBe(200);
@@ -64,8 +63,10 @@ describe("routing", () => {
     expect((await fetch(`${base}/api/status`, { method: "POST" })).status).toBe(404);
   });
 
-  test("a document id that is not a uuid never reaches a handler", async () => {
-    expect((await fetch(`${base}/api/documents/..%2F..%2Fetc/epub`)).status).toBe(404);
+  test("a document id that is not a uuid is rejected before any handler runs", async () => {
+    const response = await fetch(`${base}/api/documents/..%2F..%2Fetc/epub`);
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toMatch(/id/i);
   });
 
   test("reports the model and the hardware the estimates are based on", async () => {
@@ -89,7 +90,11 @@ describe("documents", () => {
   });
 
   test("an empty upload is refused", async () => {
-    const response = await fetch(`${base}/api/documents`, { method: "POST", body: new Uint8Array() });
+    const response = await fetch(`${base}/api/documents`, {
+      method: "POST",
+      headers: { "content-type": "application/pdf" },
+      body: new Uint8Array(),
+    });
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toContain("empty");
   });

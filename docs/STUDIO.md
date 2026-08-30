@@ -39,23 +39,44 @@ made-up one.
 
 ## API
 
+Fastify, in `src/studio/`. Routing, parameter and body validation, error status
+codes and static file serving are the framework's; what is ours is the four
+files beside it — `routes/` (the endpoints), `documents.ts` (the PDFs this
+process is holding), `schemas.ts` (every shape the API accepts, in one place)
+and `stream.ts` (the progress protocol).
+
 | route | what it does |
 |---|---|
 | `GET /api/status` | model state plus the host's CPU, cores and RAM |
 | `POST /api/model/install` | installs the runtime, streaming log lines as events |
 | `POST /api/model/unload` \| `/remove` | free memory; delete the managed runtime |
 | `POST /api/documents` | raw PDF body in, page verdicts out |
-| `GET /api/documents/:id/pages/:n.png` | a rendered page |
+| `GET /api/documents/:id/pages/:page.png` | a rendered page |
 | `POST /api/documents/:id/test` | recognize one page, timed, uncached |
 | `POST /api/documents/:id/convert` | convert, streaming stage and page progress |
 | `GET /api/documents/:id/epub` \| `/book.json` | the finished output |
 
-The two long jobs — installing and converting — answer with a stream of JSON
-events instead of one response at the end, which is what makes honest progress
-possible. A failure arrives as the stream's last event.
+Every failure answers with the same shape, `{ "error": "..." }`, at the status it
+deserves: 400 for a malformed request, 404 for a document this process no longer
+holds, 413 for an oversized upload, 500 for a genuine surprise.
 
-A document lives in server memory for the session. Nothing about it is written
-to disk except recognized pages in `.ocr-compose-cache/`.
+### Long jobs answer with events, not a response
+
+Installing and converting take minutes, so they answer with a stream of JSON
+events instead of one response at the end. That is what makes honest progress
+possible, and it comes with one rule worth knowing before editing those routes:
+
+**a streaming route must validate inside its own stream.** Fastify's schema
+validation runs *before* the handler and answers a bad request with a status
+code — which a client that is reading events never sees, so the failure vanishes
+and the UI just sits there. `POST /convert` therefore declares no schema and
+calls `parse()` from `schemas.ts` inside `stream()`, where a rejection becomes an
+`{ "type": "error" }` event like any other failure. `src/studio/server.test.ts`
+holds that behaviour down.
+
+A document lives in server memory, and only the three most recent survive — one
+holds a whole PDF and its EPUB. Nothing about it is written to disk except
+recognized pages in `.ocr-compose-cache/`.
 
 ## Ownership boundaries
 

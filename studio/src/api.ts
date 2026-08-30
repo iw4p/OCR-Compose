@@ -46,10 +46,12 @@ const errorFrom = async (response: Response): Promise<string> => {
   return problem?.error ?? fallback;
 };
 
+// The API is this repo's own server and its response types are imported from
+// it, so a successful body is taken at its word rather than re-validated here.
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) throw new Error(await errorFrom(response));
-  return response.json() as Promise<T>;
+  return (await response.json()) as T;
 }
 
 /** Consumes a server job stream, one JSON event at a time, as it happens. */
