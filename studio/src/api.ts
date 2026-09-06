@@ -1,9 +1,9 @@
-import type { Block } from "../../src/contract";
+import type { Block, Book } from "../../src/contract";
 import type { ModelStatus } from "../../src/models/registry";
 import type { OcrBlock } from "../../src/pdf/ocr";
 import type { TextLayerVerdict } from "../../src/pdf/textlayer";
 
-export type { Block } from "../../src/contract";
+export type { Block, Book } from "../../src/contract";
 export type { ModelStatus } from "../../src/models/registry";
 export type { OcrBlock } from "../../src/pdf/ocr";
 export type { TextLayerVerdict } from "../../src/pdf/textlayer";
@@ -113,3 +113,16 @@ export const convert = (
 ) => jobEvents(`/api/documents/${id}/convert`, options);
 
 export const downloadUrl = (id: string, what: "epub" | "book.json") => `/api/documents/${id}/${what}`;
+
+export const getBook = async (id: string) => (await request<{ book: Book }>(`/api/documents/${id}/book`)).book;
+
+/** Replace the book with an edited one; the server validates and re-packs the EPUB. */
+export const putBook = (id: string, book: Book) =>
+  request<{ stats: { blocks: number; footnotes: number; epubBytes: number } }>(`/api/documents/${id}/book`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ book }),
+  });
+
+/** `assets/fig-1-abc.png` (as blocks name it) → the URL that serves it. */
+export const assetUrl = (id: string, file: string) => `/api/documents/${id}/${file}`;

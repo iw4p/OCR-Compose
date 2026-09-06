@@ -11,6 +11,8 @@ export type StudioDocument = {
   bytes: Uint8Array;
   reports: PageReport[];
   book?: Book;
+  /** The images the conversion produced, kept so the book can be reviewed and re-packed. */
+  assets?: Map<string, Uint8Array>;
   epub?: Uint8Array;
 };
 

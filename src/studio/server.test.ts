@@ -189,6 +189,57 @@ describe("convert", () => {
     expect(book.content.length).toBe(done.stats.blocks);
   });
 
+  test("serves the book for review, and accepts a validated edit", async () => {
+    const { id } = await upload();
+    expect((await fetch(`${base}/api/documents/${id}/book`)).status).toBe(404);
+    await events(await convert(id, { pages: [1, 2, 3], title: "F", language: "en" }));
+
+    const { book } = (await (await fetch(`${base}/api/documents/${id}/book`)).json()) as {
+      book: { title: string; content: { type: string; text?: string }[] };
+    };
+    expect(book.title).toBe("F");
+    expect(book.content.length).toBeGreaterThan(0);
+
+    // a real edit lands in the book AND in the re-packed EPUB
+    const edited = structuredClone(book);
+    edited.content[0] = { type: "text", text: "Edited in the Review card." };
+    const put = await fetch(`${base}/api/documents/${id}/book`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ book: edited }),
+    });
+    expect(put.status).toBe(200);
+    const back = (await (await fetch(`${base}/api/documents/${id}/book`)).json()) as typeof edited & {
+      book: { content: { text?: string }[] };
+    };
+    expect((back as { book: { content: { text?: string }[] } }).book.content[0]!.text).toBe("Edited in the Review card.");
+    const epub = await (await fetch(`${base}/api/documents/${id}/epub`)).arrayBuffer();
+    expect(epub.byteLength).toBeGreaterThan(0);
+  });
+
+  test("an invalid edit is refused naming the problem, and changes nothing", async () => {
+    const { id } = await upload();
+    await events(await convert(id, { pages: [1], title: "F", language: "en" }));
+    const { book } = (await (await fetch(`${base}/api/documents/${id}/book`)).json()) as { book: { content: unknown[] } };
+    const broken = structuredClone(book);
+    broken.content[0] = { type: "text", text: "unclosed *emphasis" };
+    const put = await fetch(`${base}/api/documents/${id}/book`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ book: broken }),
+    });
+    expect(put.status).toBe(400);
+    expect(((await put.json()) as { error: string }).error).toContain("content.0");
+    const after = (await (await fetch(`${base}/api/documents/${id}/book`)).json()) as { book: { content: { text?: string }[] } };
+    expect(after.book.content[0]!.text).not.toContain("unclosed");
+  });
+
+  test("an unknown asset is a 404, and asset names cannot carry paths", async () => {
+    const { id } = await upload();
+    expect((await fetch(`${base}/api/documents/${id}/assets/nope.png`)).status).toBe(404);
+    expect((await fetch(`${base}/api/documents/${id}/assets/..%2Fsecret.png`)).status).toBe(400);
+  });
+
   test("an EPUB is only offered once there is one", async () => {
     const { id } = await upload();
     expect((await fetch(`${base}/api/documents/${id}/book.json`)).status).toBe(404);

@@ -12,6 +12,15 @@ export const PageQuery = z.object({ scale: z.coerce.number().min(0.2).max(3).def
 
 export const TestBody = z.object({ page: z.number().int().positive() });
 
+/** Asset file names are flat (`fig-1-abc.png`) — no path separators ever. */
+export const AssetParams = z.object({ id: z.uuid(), file: z.string().regex(/^[A-Za-z0-9._-]+$/) });
+
+/**
+ * An edited book. The shape here is deliberately loose — the real gatekeeper
+ * is `validateBook` in the route, whose errors name the offending block.
+ */
+export const BookBody = z.object({ book: z.unknown() });
+
 export const ConvertBody = z.object({
   pages: z.array(z.number().int().positive()).min(1, "select at least one page"),
   title: z.string().optional(),

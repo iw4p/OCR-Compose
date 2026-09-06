@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import * as api from "./api";
-import type { ConvertStats, Doc, LivePage, TestResult } from "./api";
+import type { Book, ConvertStats, Doc, LivePage, TestResult } from "./api";
 import { estimate } from "./estimate";
 import { pagesWithContent } from "./pages";
 import { useElapsed } from "./useElapsed";
@@ -9,6 +9,7 @@ import { ModelCard } from "./components/ModelCard";
 import { Dropzone } from "./components/Dropzone";
 import { FileCard } from "./components/FileCard";
 import { TestCard } from "./components/TestCard";
+import { BookCard } from "./components/BookCard";
 import { ConvertCard, type Job, type Meta } from "./components/ConvertCard";
 
 export default function App() {
@@ -35,6 +36,8 @@ export default function App() {
   const jobElapsed = useElapsed(jobStartedAt);
   const [stats, setStats] = useState<ConvertStats | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [book, setBook] = useState<Book | null>(null);
+  const [saving, setSaving] = useState(false);
 
   /** Nothing measured about one document may survive into the next. */
   function forgetDocument() {
@@ -44,6 +47,7 @@ export default function App() {
     setTestResult(null);
     setStats(null);
     setWarnings([]);
+    setBook(null);
   }
 
   async function addFile(file: File) {
@@ -81,9 +85,11 @@ export default function App() {
     if (!doc) return;
     setStats(null);
     setWarnings([]);
+    setBook(null);
     setError(null);
     setJob({ stage: "Starting", done: 0, total: 0 });
     setJobStartedAt(Date.now());
+    let finished = false;
     try {
       for await (const event of api.convert(doc.id, { pages: [...selected], ...meta, ocrAll })) {
         if (event.type === "stage") setJob((current) => ({ done: 0, total: 0, ...current, stage: event.stage }));
@@ -93,8 +99,10 @@ export default function App() {
         else if (event.type === "done") {
           setStats(event.stats ?? null);
           setWarnings(event.warnings ?? []);
+          finished = true;
         }
       }
+      if (finished) setBook(await api.getBook(doc.id));
     } catch (e) {
       fail(e);
     } finally {
@@ -102,6 +110,23 @@ export default function App() {
       setJobStartedAt(null);
       setLivePage(null);
       void model.refresh();
+    }
+  }
+
+  /** An edit from the Review card: optimistic, validated by the server, reverted on rejection. */
+  async function changeBook(next: Book) {
+    if (!doc) return;
+    const previous = book;
+    setBook(next);
+    setSaving(true);
+    try {
+      const { stats: updated } = await api.putBook(doc.id, next);
+      setStats((current) => (current ? { ...current, ...updated } : current));
+    } catch (e) {
+      setBook(previous);
+      fail(e);
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -175,6 +200,8 @@ export default function App() {
             onConvert={() => void convert()}
           />
         )}
+
+        {doc && book && !job && <BookCard docId={doc.id} book={book} busy={saving} onBook={(next) => void changeBook(next)} />}
       </main>
 
       {error && (

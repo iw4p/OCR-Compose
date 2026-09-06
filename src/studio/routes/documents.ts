@@ -1,12 +1,13 @@
 import type { FastifyPluginAsyncZod } from "fastify-type-provider-zod";
+import { validateBook, type Book } from "../../contract.js";
 import { writeEpub } from "../../epub/write.js";
 import { withModel } from "../../models/registry.js";
 import { renderPagePng } from "../../pdf/extract.js";
 import { ocrBlocksToBookBlocks } from "../../pdf/ocr.js";
 import { OCR_SCALE, pdfToBook } from "../../pdf/pdf.js";
 import { addDocument, downloadName, getDocument, requirePage } from "../documents.js";
-import { notFound } from "../errors.js";
-import { ConvertBody, DocumentParams, PageParams, PageQuery, TestBody, parse } from "../schemas.js";
+import { badRequest, notFound } from "../errors.js";
+import { AssetParams, BookBody, ConvertBody, DocumentParams, PageParams, PageQuery, TestBody, parse } from "../schemas.js";
 import { stream } from "../stream.js";
 
 /** 512 MB: the whole PDF is read into memory, and books get big. */
@@ -83,6 +84,7 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
 
       send({ type: "stage", stage: "Packing the EPUB" });
       document.book = result.book;
+      document.assets = result.assets;
       document.epub = await writeEpub(result.book, result.assets);
       send({
         type: "done",
@@ -96,6 +98,53 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
       });
     }),
   );
+
+  // The book, for review in the browser — unlike /book.json this is not a
+  // download, it is the Review card's data.
+  app.get("/api/documents/:id/book", { schema: { params: DocumentParams } }, async (request) => {
+    const document = getDocument(request.params.id);
+    if (!document.book) throw notFound("nothing converted yet");
+    return { book: document.book };
+  });
+
+  /**
+   * Replace the book with an edited one. The same validation the CLI's `pack`
+   * refuses on runs here, so a bad edit is a 400 naming the block — never a
+   * corrupt EPUB. On success the EPUB is re-packed immediately; the download
+   * links always serve what the review shows.
+   */
+  app.put("/api/documents/:id/book", { schema: { params: DocumentParams, body: BookBody } }, async (request) => {
+    const document = getDocument(request.params.id);
+    if (!document.book) throw notFound("nothing converted yet");
+    const raw: unknown = request.body.book;
+    const issues = validateBook(raw);
+    if (issues.length > 0)
+      throw badRequest(issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; "));
+    const book = raw as Book;
+    // the packer refuses an image reference with no bytes behind it — an edit
+    // that would produce a broken EPUB is a rejected edit, not a 500
+    const epub = await writeEpub(book, document.assets ?? new Map()).catch((error: unknown) => {
+      throw badRequest(error instanceof Error ? error.message : String(error));
+    });
+    document.book = book;
+    document.epub = epub;
+    return {
+      stats: {
+        blocks: book.content.length,
+        footnotes: Object.keys(book.footnotes).length,
+        epubBytes: document.epub.byteLength,
+      },
+    };
+  });
+
+  app.get("/api/documents/:id/assets/:file", { schema: { params: AssetParams } }, async (request, reply) => {
+    const document = getDocument(request.params.id);
+    const file = `assets/${request.params.file}`;
+    const bytes = document.assets?.get(file);
+    if (!bytes) throw notFound(`no such asset: ${file}`);
+    const type = /\.png$/i.test(file) ? "image/png" : /\.jpe?g$/i.test(file) ? "image/jpeg" : "application/octet-stream";
+    return reply.type(type).send(Buffer.from(bytes));
+  });
 
   app.get("/api/documents/:id/epub", { schema: { params: DocumentParams } }, async (request, reply) => {
     const document = getDocument(request.params.id);
