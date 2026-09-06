@@ -18,6 +18,15 @@ const model = (over: Partial<ModelStatus> = {}): ModelStatus => ({
   runtimeDownloadBytes: 1_200_000_000,
   weightsDownloadBytes: 2_000_000_000,
   loaded: false,
+  fast: { supported: false, installed: false, enabled: false, running: false, downloadBytes: 300_000_000 },
+  ...over,
+});
+const fast = (over: Partial<ModelStatus["fast"]> = {}): ModelStatus["fast"] => ({
+  supported: true,
+  installed: true,
+  enabled: false,
+  running: false,
+  downloadBytes: 300_000_000,
   ...over,
 });
 
@@ -32,6 +41,8 @@ const show = (over: Partial<ModelStatus> | null, props: Partial<Parameters<typeo
       log={[]}
       elapsedMs={0}
       onInstall={() => {}}
+      onEnableFast={() => {}}
+      onDisableFast={() => {}}
       onUnload={() => {}}
       onRemove={() => {}}
       {...props}
@@ -92,6 +103,32 @@ describe("once installed", () => {
     fireEvent.click(screen.getByRole("button", { name: /keep it/i }));
     expect(onRemove).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: /uninstall/i })).toBeTruthy();
+  });
+});
+
+describe("fast mode", () => {
+  test("is never mentioned off Apple Silicon", () => {
+    show({});
+    expect(screen.queryByText(/fast mode/i)).toBeNull();
+  });
+
+  test("offers one click on Apple Silicon, download size only when needed", () => {
+    const onEnableFast = vi.fn();
+    show({ fast: fast({ installed: false }) }, { onEnableFast });
+    const button = screen.getByRole("button", { name: /enable fast mode \(≈ \d+ MB\)/i });
+    fireEvent.click(button);
+    expect(onEnableFast).toHaveBeenCalledOnce();
+    cleanup();
+    show({ fast: fast({ installed: true }) });
+    expect(screen.getByRole("button", { name: "Enable fast mode" })).toBeTruthy();
+  });
+
+  test("shows it is on, and offers the way back off", () => {
+    const onDisableFast = vi.fn();
+    show({ fast: fast({ enabled: true }) }, { onDisableFast });
+    expect(screen.getByText("on — Apple GPU")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /turn off/i }));
+    expect(onDisableFast).toHaveBeenCalledOnce();
   });
 });
 

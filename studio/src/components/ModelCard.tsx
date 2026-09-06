@@ -49,7 +49,46 @@ function InstalledModel({ model, hardware }: { model: ModelStatus; hardware: Har
           {hardware.cpu} · {hardware.cores} cores · {formatBytes(hardware.memoryBytes)}
         </Stat>
       )}
+      {model.fast.supported && (
+        <Stat label="fast mode">
+          {model.fast.enabled ? <span className="accent">on — Apple GPU</span> : "available"}
+        </Stat>
+      )}
     </dl>
+  );
+}
+
+/**
+ * One click from CPU to the Apple GPU — with the honest caveat attached,
+ * because the fast path can very rarely repeat a phrase.
+ */
+function FastModeOffer({
+  model,
+  onEnable,
+  onDisable,
+}: {
+  model: ModelStatus;
+  onEnable: () => void;
+  onDisable: () => void;
+}) {
+  if (!model.fast.supported) return null;
+  return model.fast.enabled ? (
+    <p className="sub fast-row">
+      Fast mode runs the recognizer on this Mac's GPU.{" "}
+      <button type="button" className="btn ghost" onClick={onDisable}>
+        turn off
+      </button>
+    </p>
+  ) : (
+    <div className="fast-row">
+      <p className="sub">
+        This is an Apple Silicon Mac — <strong>fast mode</strong> runs the recognizer on its GPU, about 8× faster
+        than the CPU here. Very rarely it repeats a phrase; the CPU path stays the reference.
+      </p>
+      <button type="button" className="btn primary" onClick={onEnable}>
+        Enable fast mode{model.fast.installed ? "" : ` (≈ ${formatBytes(model.fast.downloadBytes)})`}
+      </button>
+    </div>
   );
 }
 
@@ -119,6 +158,8 @@ export function ModelCard({
   log,
   elapsedMs,
   onInstall,
+  onEnableFast,
+  onDisableFast,
   onUnload,
   onRemove,
 }: {
@@ -128,6 +169,8 @@ export function ModelCard({
   log: string[];
   elapsedMs: number;
   onInstall: () => void;
+  onEnableFast: () => void;
+  onDisableFast: () => void;
   onUnload: () => void;
   onRemove: () => void;
 }) {
@@ -149,7 +192,10 @@ export function ModelCard({
       </header>
 
       {model.installed ? (
-        <InstalledModel model={model} hardware={hardware} />
+        <>
+          <InstalledModel model={model} hardware={hardware} />
+          {!installing && <FastModeOffer model={model} onEnable={onEnableFast} onDisable={onDisableFast} />}
+        </>
       ) : (
         !installing && <InstallOffer model={model} hardware={hardware} onInstall={onInstall} />
       )}

@@ -7,6 +7,16 @@ import { access, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { paddleEngine, type OcrEngine } from "../pdf/ocr.js";
+import {
+  FAST_MODE_VL_MODEL,
+  disableFastMode,
+  enableFastMode,
+  ensureFastServer,
+  fastModeStatus,
+  fastModeSupported,
+  stopFastServer,
+  type FastModeStatus,
+} from "./fastmode.js";
 
 export const MODEL_ID = "paddleocr-vl-1.6";
 
@@ -28,6 +38,8 @@ export type ModelStatus = {
   weightsDownloadBytes: number;
   /** True while a warm engine is held in memory. */
   loaded: boolean;
+  /** Apple-GPU acceleration for the VLM step. See fastmode.ts. */
+  fast: FastModeStatus;
 };
 
 /**
@@ -117,7 +129,26 @@ export async function modelStatus(): Promise<ModelStatus> {
     runtimeDownloadBytes: 1_200_000_000,
     weightsDownloadBytes: 2_000_000_000,
     loaded: warm !== null,
+    fast: await fastModeStatus(python),
   };
+}
+
+/**
+ * Switch fast mode on, installing mlx-vlm first if needed. Only a managed
+ * environment is ever installed into; an external one gets instructions.
+ */
+export async function enableFast(onLog: (line: string) => void = () => {}): Promise<string> {
+  if (!fastModeSupported()) throw new Error("Fast mode needs Apple Silicon (darwin/arm64).");
+  const python = await findPython();
+  if (!python) throw new Error("Install PaddleOCR-VL first — fast mode accelerates it, it does not replace it.");
+  const managed = resolve(python).startsWith(managedModelDir(MODEL_ID) + sep);
+  return enableFastMode(python, { allowInstall: managed, onLog });
+}
+
+/** Switch fast mode off. The next engine runs on the CPU again. */
+export async function disableFast(): Promise<string> {
+  await unloadModel(); // a warm fast-mode engine keeps its server; drop both
+  return disableFastMode();
 }
 
 /** Creates an isolated venv and pip-installs PaddleOCR into it. */
@@ -175,6 +206,28 @@ const release = (entry: Warm) => {
 const createEngine = async (): Promise<OcrEngine> => {
   const python = await findPython();
   if (!python) throw new Error("PaddleOCR-VL is not installed. Install it first.");
+  const fast = await fastModeStatus(python);
+  if (fast.supported && fast.enabled && fast.installed) {
+    // The server's lifetime is the engine's: it starts when the engine warms
+    // and stops when the engine closes (idle unload included). If it cannot
+    // come up, the conversion still runs — on the CPU, not not at all.
+    const url = await ensureFastServer(python);
+    if (url) {
+      const engine = paddleEngine({
+        pythonPath: python,
+        vlBackend: "mlx-vlm-server",
+        vlServerUrl: url,
+        vlModelName: FAST_MODE_VL_MODEL,
+      });
+      return {
+        ...engine,
+        close: async () => {
+          await engine.close?.();
+          await stopFastServer();
+        },
+      };
+    }
+  }
   return paddleEngine({ pythonPath: python });
 };
 

@@ -29,28 +29,35 @@ export function useModel(onError: (problem: unknown) => void) {
     void refresh();
   }, [refresh]);
 
-  const install = useCallback(async () => {
-    setLog([]);
-    setInstallStartedAt(Date.now());
-    try {
-      for await (const event of api.installModel()) {
-        if (event.type === "log") setLog((lines) => [...lines, event.line]);
-        else if (event.type === "error") onError(new Error(event.message));
-        else if (event.type === "done") {
-          const summary = event.message;
-          if (summary) setLog((lines) => [...lines, summary]);
+  /** Runs one streaming job (install, or fast-mode enable) through the shared log. */
+  const runJob = useCallback(
+    async (events: AsyncGenerator<api.JobEvent>) => {
+      setLog([]);
+      setInstallStartedAt(Date.now());
+      try {
+        for await (const event of events) {
+          if (event.type === "log") setLog((lines) => [...lines, event.line]);
+          else if (event.type === "error") onError(new Error(event.message));
+          else if (event.type === "done") {
+            const summary = event.message;
+            if (summary) setLog((lines) => [...lines, summary]);
+          }
         }
+      } catch (problem) {
+        onError(problem);
+      } finally {
+        setInstallStartedAt(null);
+        void refresh();
       }
-    } catch (problem) {
-      onError(problem);
-    } finally {
-      setInstallStartedAt(null);
-      void refresh();
-    }
-  }, [onError, refresh]);
+    },
+    [onError, refresh],
+  );
+
+  const install = useCallback(() => runJob(api.installModel()), [runJob]);
+  const enableFast = useCallback(() => runJob(api.enableFastMode()), [runJob]);
 
   const act = useCallback(
-    async (action: "unload" | "remove") => {
+    async (action: "unload" | "remove" | "fast/disable") => {
       try {
         setStatus((await api.modelAction(action)).model);
       } catch (problem) {
@@ -68,6 +75,8 @@ export function useModel(onError: (problem: unknown) => void) {
     log,
     elapsedMs,
     install,
+    enableFast,
+    disableFast: () => void act("fast/disable"),
     unload: () => void act("unload"),
     remove: () => void act("remove"),
     refresh,

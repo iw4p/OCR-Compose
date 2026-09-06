@@ -151,6 +151,11 @@ input {
 }
 input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
 
+/* ---------- fast mode ---------- */
+.fast-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0; }
+.fast-row .sub { margin: 0; flex: 1; min-width: 260px; }
+.fast-row .btn { flex: none; }
+
 /* ---------- live conversion readout ---------- */
 .live-page { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; animation: live-in 0.35s ease; }
 @keyframes live-in {

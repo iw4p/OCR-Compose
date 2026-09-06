@@ -86,7 +86,9 @@ export const getStatus = () => request<{ model: ModelStatus; hardware: Hardware 
 
 export const installModel = () => jobEvents("/api/model/install");
 
-export const modelAction = (action: "unload" | "remove") =>
+export const enableFastMode = () => jobEvents("/api/model/fast/enable");
+
+export const modelAction = (action: "unload" | "remove" | "fast/disable") =>
   request<{ message: string; model: ModelStatus }>(`/api/model/${action}`, { method: "POST" });
 
 export const addDocument = (file: File) =>

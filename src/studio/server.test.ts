@@ -72,12 +72,14 @@ describe("routing", () => {
 
   test("reports the model and the hardware the estimates are based on", async () => {
     const status = (await (await fetch(`${base}/api/status`)).json()) as {
-      model: { id: string; installed: boolean };
+      model: { id: string; installed: boolean; fast: Record<string, unknown> };
       hardware: { cores: number; memoryBytes: number };
     };
     expect(status.model.id).toBe("paddleocr-vl-1.6");
     expect(status.hardware.cores).toBeGreaterThan(0);
     expect(status.hardware.memoryBytes).toBeGreaterThan(0);
+    // fast mode is part of the status contract on every platform
+    expect(Object.keys(status.model.fast).sort()).toEqual(["downloadBytes", "enabled", "installed", "running", "supported"]);
   });
 });
 

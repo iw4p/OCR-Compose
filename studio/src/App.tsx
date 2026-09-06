@@ -125,6 +125,8 @@ export default function App() {
           log={model.log}
           elapsedMs={model.elapsedMs}
           onInstall={() => void model.install()}
+          onEnableFast={() => void model.enableFast()}
+          onDisableFast={model.disableFast}
           onUnload={model.unload}
           onRemove={model.remove}
         />
