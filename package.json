@@ -43,6 +43,7 @@
     "fastify-type-provider-zod": "^7.0.0",
     "jszip": "^3.10.1",
     "mupdf": "^1.28.0",
+    "temml": "^0.13.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

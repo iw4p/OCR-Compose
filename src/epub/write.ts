@@ -1,6 +1,7 @@
 // Contract → EPUB3 (DESIGN.md tool 15). Single reflowable spine document for
 // v1; nav doc built from heading blocks; assets carried verbatim.
 import JSZip from "jszip";
+import temml from "temml";
 import type { Block, Book } from "../contract.js";
 import { isDemoted, walkBlocks } from "../contract.js";
 import { parseInline, renderInline, type InlineNode } from "../inline.js";
@@ -108,12 +109,22 @@ function injectMarker(nodes: RNode[], offset: number, page: number): RNode[] {
 
 const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
 
-// TeX is carried losslessly as an application/x-tex annotation with the raw
-// TeX as mtext fallback; real TeX→MathML conversion is the later `mathpass`.
-const mathml = (tex: string, display: boolean) =>
-  `<math xmlns="${MATHML_NS}"${display ? ' display="block"' : ""}><semantics><mrow><mtext>${escapeXml(
-    tex
-  )}</mtext></mrow><annotation encoding="application/x-tex">${escapeXml(tex)}</annotation></semantics></math>`;
+/**
+ * TeX → structured MathML (temml), with the TeX riding along losslessly as an
+ * application/x-tex annotation — the same annotation `read.ts` recovers the
+ * TeX from. TeX that temml cannot parse degrades to the TeX source in an
+ * mtext, never to an error box and never silently: the annotation contract
+ * holds either way.
+ */
+const mathml = (tex: string, display: boolean): string => {
+  try {
+    return temml.renderToString(tex, { xml: true, displayMode: display, annotate: true, throwOnError: true });
+  } catch {
+    return `<math xmlns="${MATHML_NS}"${display ? ' display="block"' : ""}><semantics><mrow><mtext>${escapeXml(
+      tex
+    )}</mtext></mrow><annotation encoding="application/x-tex">${escapeXml(tex)}</annotation></semantics></math>`;
+  }
+};
 
 function renderInlineHtml(nodes: RNode[], ctx: RenderCtx): string {
   let out = "";

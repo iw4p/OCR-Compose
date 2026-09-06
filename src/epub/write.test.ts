@@ -256,9 +256,19 @@ describe("block rendering", () => {
   test("fidelity rule: tex present renders MathML with TeX annotation, tex null falls back to image", async () => {
     const body = await bodyOf(feldtheorie);
     expect(body).toMatch(
-      /<math xmlns="http:\/\/www\.w3\.org\/1998\/Math\/MathML" display="block">[\s\S]*<annotation encoding="application\/x-tex">S\[\\phi\] = \\int/
+      /<math xmlns="http:\/\/www\.w3\.org\/1998\/Math\/MathML"[^>]*display="block"[^>]*>[\s\S]*<annotation encoding="application\/x-tex">S\[\\phi\] = \\int/
     );
+    // structured MathML (temml), not the TeX source in an mtext
+    expect(body).toMatch(/<mo[^>]*>∫<\/mo>/);
     expect(body).toMatch(/<img src="\.\.\/assets\/eq-2-15\.png"/);
+  });
+
+  test("TeX that cannot be parsed degrades to its source, annotation intact", async () => {
+    const book = structuredClone(feldtheorie);
+    book.content.push({ type: "formula", display: true, tex: "\\frac{unclosed" });
+    const body = await bodyOf(book);
+    expect(body).not.toContain("temml-error");
+    expect(body).toMatch(/<mtext>\\frac\{unclosed<\/mtext>[\s\S]*x-tex">\\frac\{unclosed<\/annotation>/);
   });
 
   test("inline math renders as inline MathML", async () => {
