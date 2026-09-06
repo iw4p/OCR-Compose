@@ -131,6 +131,55 @@ describe.skipIf(!existsSync(SCAN))("scanned PDF illustrations (Alice, archive.or
   });
 });
 
+// Paper mode: native pages go through the model too, because the native path
+// reads multi-column layouts in raw text order. See PdfOptions.ocrAll.
+describe.skipIf(!existsSync(ALICE))("paper mode (ocrAll) on a native PDF", () => {
+  const bytes = () => new Uint8Array(readFileSync(ALICE));
+
+  test("replaces the native text of recognized pages with the model's reading", async () => {
+    const engine: OcrEngine = { name: "stub", recognize: async () => ALICE_PAGE_19 };
+    const { book, warnings } = await pdfToBook(bytes(), {
+      title: "Alice excerpt",
+      language: "en",
+      pages: [10, 11],
+      ocr: engine,
+      ocrAll: true,
+    });
+    expect(validateBook(book)).toEqual([]);
+    expect(warnings).toContain("2 pages OCRed with stub");
+    // every text block is the stub's, none leaked in from the native text layer
+    const texts = book.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text);
+    expect(texts.length).toBeGreaterThan(0);
+    for (const text of texts) expect(ALICE_PAGE_19.some((r) => r.text === text)).toBe(true);
+  });
+
+  test("a page the model reads as empty falls back to its own text layer", async () => {
+    const engine: OcrEngine = { name: "stub", recognize: async () => [] };
+    const { book } = await pdfToBook(bytes(), {
+      title: "Alice excerpt",
+      language: "en",
+      pages: [10, 11],
+      ocr: engine,
+      ocrAll: true,
+    });
+    expect(validateBook(book)).toEqual([]);
+    expect(book.content.length).toBeGreaterThan(0);
+  });
+
+  test("without ocrAll the same engine leaves native pages alone", async () => {
+    const recognize = { calls: 0 };
+    const engine: OcrEngine = {
+      name: "stub",
+      recognize: async () => {
+        recognize.calls += 1;
+        return ALICE_PAGE_19;
+      },
+    };
+    await pdfToBook(bytes(), { title: "Alice excerpt", language: "en", pages: [10, 11], ocr: engine });
+    expect(recognize.calls).toBe(0);
+  });
+});
+
 describe.skipIf(!existsSync(ALICE))("selected PDF pages", () => {
   test("retains original source-page provenance", async () => {
     const { book, report } = await pdfToBook(new Uint8Array(readFileSync(ALICE)), {

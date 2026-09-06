@@ -24,6 +24,14 @@ export type PdfOptions = {
   pages?: number[];
   /** OCR engine for scan-backed pages. The caller owns it, and closes it. */
   ocr?: OcrEngine;
+  /**
+   * Recognize native-text pages with the model too. The native path reads
+   * columns in raw text order, so multi-column layouts — academic papers —
+   * come out interleaved; the model reads the page like a person instead and
+   * brings formulas (TeX) and tables (rows) with it. A page whose recognition
+   * yields nothing falls back to its own text layer.
+   */
+  ocrAll?: boolean;
   onProgress?: (done: number, total: number) => void;
 };
 export type PdfResult = {
@@ -60,7 +68,9 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
   // hidden text in a double-layer PDF; only the rendered, visible page enters
   // the OCR provider. OCR semantic blocks never pass through native line
   // unwrapping or font-size heading inference.
-  const needsOcr = reports.filter((r) => r.verdict === "scanned");
+  const needsOcr = reports.filter(
+    (r) => r.verdict === "scanned" || (opts.ocrAll === true && r.verdict === "native")
+  );
   const ocrPages = new Set<number>();
   const ocrByPage = new Map<number, OcrBlock[]>();
   const assets = new Map<string, Uint8Array>();
@@ -85,7 +95,7 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
     warnings.push(`${needsOcr.length} pages OCRed with ${opts.ocr.name}`);
   }
 
-  const usable = counts.native + ocrPages.size;
+  const usable = reports.filter((r) => r.verdict === "native" || ocrPages.has(r.page)).length;
   const total = extraction.pages.length;
   if (usable < total * 0.5)
     throw new Error(
@@ -103,7 +113,12 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
     return false;
   });
 
-  const nativePages = usablePages.filter((page) => reportByPage.get(page.page)!.verdict === "native");
+  // A native page the model already recognized must not enter the native path
+  // too — its content would appear twice. (With ocrAll, that is every native
+  // page except the ones whose recognition came back empty.)
+  const nativePages = usablePages.filter(
+    (page) => reportByPage.get(page.page)!.verdict === "native" && !ocrPages.has(page.page)
+  );
   const { printedPages } = classify(nativePages);
 
   // Native layout is interpreted in contiguous runs so pages separated by an
@@ -156,7 +171,7 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
   // extract pass pulls bytes for just those pages (scan images would blow the
   // heap). Scanned pages got theirs cropped from the page render above.
   const nativePageNumbers = new Set(
-    reports.filter((r) => r.verdict === "native").map((r) => r.page)
+    reports.filter((r) => r.verdict === "native" && !ocrPages.has(r.page)).map((r) => r.page)
   );
   const images =
     nativePageNumbers.size > 0 ? extractPdf(bytes, { imagePages: nativePageNumbers }).images : [];

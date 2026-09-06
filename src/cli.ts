@@ -29,17 +29,18 @@ export async function unpackEpub(epubPath: string, bookDir: string): Promise<str
 export async function pdfToBookDir(
   pdfPath: string,
   bookDir: string,
-  opts: { title?: string; author?: string; language?: string; pages?: number[]; ocr?: boolean } = {}
+  opts: { title?: string; author?: string; language?: string; pages?: number[]; ocr?: boolean; ocrAll?: boolean } = {}
 ): Promise<{ warnings: string[]; counts: Record<string, number> }> {
   const { pdfToBook } = await import("./pdf/pdf.js");
   const { paddleEngine } = await import("./pdf/ocr.js");
   // whoever creates the engine closes it; pdfToBook only borrows it
-  const engine = opts.ocr ? paddleEngine() : undefined;
+  const engine = opts.ocr || opts.ocrAll ? paddleEngine() : undefined;
   const { book, assets, warnings, report } = await pdfToBook(new Uint8Array(await readFile(pdfPath)), {
     ...(opts.title !== undefined && { title: opts.title }),
     ...(opts.author !== undefined && { author: opts.author }),
     ...(opts.language !== undefined && { language: opts.language }),
     ...(opts.pages !== undefined && { pages: opts.pages }),
+    ...(opts.ocrAll && { ocrAll: true }),
     ...(engine && {
       ocr: engine,
       onProgress: (done: number, total: number) => {
@@ -123,13 +124,14 @@ async function main(argv: string[]): Promise<number> {
         };
         const [pdf, dir] = positional;
         if (!pdf || !dir)
-          throw new Error("usage: ocr-compose pdf <in.pdf> <book-dir> [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]");
+          throw new Error("usage: ocr-compose pdf <in.pdf> <book-dir> [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr] [--ocr-all]");
         const opts = {
           ...(flag("title") !== undefined && { title: flag("title")! }),
           ...(flag("author") !== undefined && { author: flag("author")! }),
           ...(flag("lang") !== undefined && { language: flag("lang")! }),
           ...(flag("pages") !== undefined && { pages: parsePageSpec(flag("pages")!) }),
           ...(args.includes("--ocr") && { ocr: true }),
+          ...(args.includes("--ocr-all") && { ocrAll: true }),
         };
         const { warnings, counts } = await pdfToBookDir(pdf, dir, opts);
         console.log(`textlayer: ${JSON.stringify(counts)}`);
