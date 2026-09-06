@@ -17,6 +17,8 @@ export const ConvertBody = z.object({
   title: z.string().optional(),
   author: z.string().optional(),
   language: z.string().default("en"),
+  /** Paper mode: recognize native-text pages with the model too (multi-column layouts, formulas, tables). */
+  ocrAll: z.boolean().default(false),
 });
 
 /** Human-readable, one line: `pages: select at least one page`. */

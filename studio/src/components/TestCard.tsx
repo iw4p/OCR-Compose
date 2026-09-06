@@ -1,7 +1,6 @@
 import type { Doc, TestResult } from "../api";
-import { pageImage } from "../api";
-import { describeBlock } from "../blocks";
 import { formatDuration } from "../format";
+import { PageReadout } from "./PageReadout";
 
 export function TestCard({
   doc,
@@ -74,36 +73,7 @@ export function TestCard({
               </>
             )}
           </div>
-          <div className="test-split">
-            <div className="page-shot">
-              <img src={pageImage(doc.id, result.page, 1)} alt={`page ${result.page}`} />
-              {result.regions.map((region, i) => (
-                <span
-                  key={i}
-                  className="region"
-                  style={{
-                    left: `${region.x * 100}%`,
-                    top: `${region.y * 100}%`,
-                    width: `${region.w * 100}%`,
-                    height: `${region.h * 100}%`,
-                  }}
-                  title={region.label}
-                />
-              ))}
-            </div>
-            <ol className="blocks">
-              {result.blocks.length === 0 && <li className="dim">Nothing recognized on this page.</li>}
-              {result.blocks.map((block, i) => {
-                const { kind, text } = describeBlock(block);
-                return (
-                  <li key={i}>
-                    <span className="kind">{kind}</span>
-                    <span className="block-text">{text}</span>
-                  </li>
-                );
-              })}
-            </ol>
-          </div>
+          <PageReadout docId={doc.id} page={result.page} regions={result.regions} blocks={result.blocks} />
         </>
       )}
     </section>

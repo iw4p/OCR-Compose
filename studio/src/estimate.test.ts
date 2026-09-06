@@ -35,4 +35,17 @@ describe("estimate", () => {
   test("an empty selection costs only startup", () => {
     expect(estimate(book, new Set(), undefined)).toMatchObject({ selected: 0, totalMs: 2_000 });
   });
+
+  // Paper mode: native pages go through the model too, so they cost the
+  // measured OCR rate instead of the near-free native rate.
+  test("paper mode charges native pages the measured cost too", () => {
+    const result = estimate(book, all, 5_000, true);
+    expect(result.recognized).toBe(3);
+    expect(result.totalMs).toBe(2_000 + 3 * 5_000);
+  });
+
+  test("paper mode on an all-native selection needs a timed page first", () => {
+    expect(estimate(book, new Set([1]), undefined, true).totalMs).toBeNull();
+    expect(estimate(book, new Set([1]), undefined).totalMs).toBe(2_000 + 120);
+  });
 });

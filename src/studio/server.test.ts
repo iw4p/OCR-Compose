@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { startStudio } from "./server.js";
@@ -138,6 +139,23 @@ describe("a job stream reports its own failures", () => {
     expect(delivered[0]).toMatchObject({ type: "error" });
     expect(String(delivered[0]!.message)).toContain("pages");
   });
+
+  // Paper mode routes native pages through the model, so asking for it on a
+  // machine without the model must fail as an event the client can show.
+  // (Skipped where the model actually is installed — it would really convert.
+  // The paths mirror the registry's findPython candidates.)
+  test.skipIf(
+    existsSync(".ocr-compose-models/paddleocr-vl-1.6") ||
+      existsSync(".venv-paddleocr") ||
+      !!process.env.OCR_COMPOSE_PADDLEOCR_PYTHON,
+  )(
+    "paper mode without an installed model arrives as an error event",
+    async () => {
+      const { id } = await upload();
+      const delivered = await events(await convert(id, { pages: [1], ocrAll: true }));
+      expect(delivered.at(-1)).toMatchObject({ type: "error", message: expect.stringContaining("not installed") });
+    },
+  );
 
   test("a forgotten document arrives as an error event", async () => {
     const delivered = await events(await convert(crypto.randomUUID(), { pages: [1] }));

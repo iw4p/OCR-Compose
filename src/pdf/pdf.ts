@@ -25,6 +25,12 @@ export type PdfOptions = {
   /** OCR engine for scan-backed pages. The caller owns it, and closes it. */
   ocr?: OcrEngine;
   /**
+   * Called after each page the engine reads, with the regions it found and
+   * the blocks they became — the Studio streams these so a long conversion
+   * shows the book being read, page by page, not just a bar filling.
+   */
+  onPage?: (page: number, regions: OcrBlock[], blocks: Block[]) => void;
+  /**
    * Recognize native-text pages with the model too. The native path reads
    * columns in raw text order, so multi-column layouts — academic papers —
    * come out interleaved; the model reads the page like a person instead and
@@ -82,6 +88,7 @@ export async function pdfToBook(bytes: Uint8Array, opts: PdfOptions = {}): Promi
       const render = renderPage(bytes, r.page, OCR_SCALE);
       const raw = await opts.ocr.recognize(render.png, langs);
       const semantic = ocrBlocksToBookBlocks(raw, r.page);
+      opts.onPage?.(r.page, raw, semantic);
       if (semantic.length > 0) {
         ocrByPage.set(r.page, raw);
         ocrPages.add(r.page);

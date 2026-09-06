@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import * as api from "./api";
-import type { ConvertStats, Doc, TestResult } from "./api";
+import type { ConvertStats, Doc, LivePage, TestResult } from "./api";
 import { estimate } from "./estimate";
 import { pagesWithContent } from "./pages";
 import { useElapsed } from "./useElapsed";
@@ -23,12 +23,14 @@ export default function App() {
   const [reading, setReading] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [meta, setMeta] = useState<Meta>({ title: "", author: "", language: "en" });
+  const [ocrAll, setOcrAll] = useState(false);
 
   const [testPage, setTestPage] = useState(1);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [testing, setTesting] = useState(false);
 
   const [job, setJob] = useState<Omit<Job, "elapsedMs"> | null>(null);
+  const [livePage, setLivePage] = useState<LivePage | null>(null);
   const [jobStartedAt, setJobStartedAt] = useState<number | null>(null);
   const jobElapsed = useElapsed(jobStartedAt);
   const [stats, setStats] = useState<ConvertStats | null>(null);
@@ -38,6 +40,7 @@ export default function App() {
   function forgetDocument() {
     setDoc(null);
     setSelected(new Set());
+    setOcrAll(false);
     setTestResult(null);
     setStats(null);
     setWarnings([]);
@@ -82,9 +85,10 @@ export default function App() {
     setJob({ stage: "Starting", done: 0, total: 0 });
     setJobStartedAt(Date.now());
     try {
-      for await (const event of api.convert(doc.id, { pages: [...selected], ...meta })) {
+      for await (const event of api.convert(doc.id, { pages: [...selected], ...meta, ocrAll })) {
         if (event.type === "stage") setJob((current) => ({ done: 0, total: 0, ...current, stage: event.stage }));
         else if (event.type === "progress") setJob({ stage: event.stage, done: event.done, total: event.total });
+        else if (event.type === "page") setLivePage({ page: event.page, regions: event.regions, blocks: event.blocks });
         else if (event.type === "error") fail(event.message);
         else if (event.type === "done") {
           setStats(event.stats ?? null);
@@ -96,12 +100,13 @@ export default function App() {
     } finally {
       setJob(null);
       setJobStartedAt(null);
+      setLivePage(null);
       void model.refresh();
     }
   }
 
-  const projection = doc ? estimate(doc.pages, selected, testResult?.elapsedMs) : null;
-  const needsModel = projection !== null && projection.scanned > 0;
+  const projection = doc ? estimate(doc.pages, selected, testResult?.elapsedMs, ocrAll) : null;
+  const needsModel = projection !== null && projection.recognized > 0;
 
   return (
     <div className="shell">
@@ -148,16 +153,21 @@ export default function App() {
             doc={doc}
             meta={meta}
             onMeta={setMeta}
+            ocrAll={ocrAll}
+            onOcrAll={setOcrAll}
             estimate={projection}
             ready={selected.size > 0 && (!needsModel || model.installed)}
             blocked={
               needsModel && !model.installed
-                ? "Some selected pages are scans, so they need the model. Install it above, or select only native-text pages."
+                ? ocrAll && projection.scanned === 0
+                  ? "Paper mode sends every page through the model. Install it above, or turn paper mode off."
+                  : "Some selected pages are scans, so they need the model. Install it above, or select only native-text pages."
                 : projection.totalMs === null
                   ? "Read one page above to learn this machine's speed and get a real time estimate."
                   : null
             }
             job={job ? { ...job, elapsedMs: jobElapsed } : null}
+            livePage={livePage}
             stats={stats}
             warnings={warnings}
             onConvert={() => void convert()}

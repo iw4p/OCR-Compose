@@ -1,7 +1,8 @@
-import type { ConvertStats, Doc } from "../api";
+import type { ConvertStats, Doc, LivePage } from "../api";
 import { downloadUrl } from "../api";
 import type { Estimate } from "../estimate";
 import { formatBytes, formatClock, formatDuration } from "../format";
+import { PageReadout } from "./PageReadout";
 
 export type Meta = { title: string; author: string; language: string };
 export type Job = { stage: string; done: number; total: number; elapsedMs: number };
@@ -10,10 +11,13 @@ export function ConvertCard({
   doc,
   meta,
   onMeta,
+  ocrAll,
+  onOcrAll,
   estimate,
   ready,
   blocked,
   job,
+  livePage,
   stats,
   warnings,
   onConvert,
@@ -21,10 +25,13 @@ export function ConvertCard({
   doc: Doc;
   meta: Meta;
   onMeta: (meta: Meta) => void;
+  ocrAll: boolean;
+  onOcrAll: (on: boolean) => void;
   estimate: Estimate;
   ready: boolean;
   blocked: string | null;
   job: Job | null;
+  livePage: LivePage | null;
   stats: ConvertStats | null;
   warnings: string[];
   onConvert: () => void;
@@ -41,6 +48,7 @@ export function ConvertCard({
           <h2>Convert</h2>
           <p className="sub">
             {estimate.selected} pages — {estimate.scanned} scanned, {estimate.native} native, {estimate.blank} blank.
+            {ocrAll && estimate.recognized > 0 && <> The model reads all {estimate.recognized}.</>}
           </p>
         </div>
         {estimate.totalMs !== null && !job && !stats && (
@@ -65,6 +73,23 @@ export function ConvertCard({
           <input value={meta.language} onChange={(e) => onMeta({ ...meta, language: e.target.value })} />
         </label>
       </div>
+
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={ocrAll}
+          disabled={job !== null}
+          onChange={(e) => onOcrAll(e.target.checked)}
+        />
+        <span className="switch" aria-hidden="true" />
+        <span className="toggle-text">
+          <strong>Paper mode</strong>
+          <span className="sub">
+            The model reads every page — multi-column layouts in the right order, formulas as real
+            math, tables as tables. For academic papers; slower than plain text extraction.
+          </span>
+        </span>
+      </label>
 
       {blocked && <p className="note">{blocked}</p>}
 
@@ -99,6 +124,14 @@ export function ConvertCard({
               {remaining !== null && ` · ${formatDuration(remaining)} left`}
             </span>
           </div>
+          {livePage && (
+            <div className="live-page" key={livePage.page}>
+              <p className="sub">
+                Just read — page <span className="mono">{livePage.page}</span>:
+              </p>
+              <PageReadout docId={doc.id} page={livePage.page} regions={livePage.regions} blocks={livePage.blocks} />
+            </div>
+          )}
         </div>
       )}
 

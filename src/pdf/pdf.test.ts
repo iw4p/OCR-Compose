@@ -166,6 +166,24 @@ describe.skipIf(!existsSync(ALICE))("paper mode (ocrAll) on a native PDF", () =>
     expect(book.content.length).toBeGreaterThan(0);
   });
 
+  test("streams each recognized page to onPage as it lands", async () => {
+    const engine: OcrEngine = { name: "stub", recognize: async () => ALICE_PAGE_19 };
+    const seen: number[] = [];
+    await pdfToBook(bytes(), {
+      title: "Alice excerpt",
+      language: "en",
+      pages: [10, 11],
+      ocr: engine,
+      ocrAll: true,
+      onPage: (page, regions, blocks) => {
+        seen.push(page);
+        expect(regions).toEqual(ALICE_PAGE_19);
+        expect(blocks.length).toBeGreaterThan(0);
+      },
+    });
+    expect(seen).toEqual([10, 11]);
+  });
+
   test("without ocrAll the same engine leaves native pages alone", async () => {
     const recognize = { calls: 0 };
     const engine: OcrEngine = {

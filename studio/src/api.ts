@@ -37,8 +37,12 @@ export type JobEvent =
   | { type: "log"; line: string }
   | { type: "stage"; stage: string }
   | { type: "progress"; stage: string; done: number; total: number }
+  | { type: "page"; page: number; regions: OcrBlock[]; blocks: Block[] }
   | { type: "done"; message?: string; stats?: ConvertStats; warnings?: string[] }
   | { type: "error"; message: string };
+
+/** The page the conversion most recently read, streamed live. */
+export type LivePage = { page: number; regions: OcrBlock[]; blocks: Block[] };
 
 const errorFrom = async (response: Response): Promise<string> => {
   const fallback = `Request failed (${response.status})`;
@@ -103,7 +107,7 @@ export const testPage = (id: string, page: number) =>
 
 export const convert = (
   id: string,
-  options: { pages: number[]; title: string; author: string; language: string },
+  options: { pages: number[]; title: string; author: string; language: string; ocrAll: boolean },
 ) => jobEvents(`/api/documents/${id}/convert`, options);
 
 export const downloadUrl = (id: string, what: "epub" | "book.json") => `/api/documents/${id}/${what}`;

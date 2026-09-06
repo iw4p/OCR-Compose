@@ -13,6 +13,7 @@ const projection = (over: Partial<Estimate> = {}): Estimate => ({
   scanned: 10,
   native: 0,
   blank: 0,
+  recognized: 10,
   totalMs: 600_000,
   ...over,
 });
@@ -23,10 +24,13 @@ const show = (props: Partial<Parameters<typeof ConvertCard>[0]> = {}) =>
       doc={doc}
       meta={{ title: "Alice", author: "Carroll", language: "en" }}
       onMeta={() => {}}
+      ocrAll={false}
+      onOcrAll={() => {}}
       estimate={projection()}
       ready
       blocked={null}
       job={null}
+      livePage={null}
       stats={null}
       warnings={[]}
       onConvert={() => {}}
@@ -44,6 +48,18 @@ describe("before it runs", () => {
   test("offers no estimate at all when no page has been timed", () => {
     show({ estimate: projection({ totalMs: null }) });
     expect(screen.queryByText(/^\d+ min$/)).toBeNull();
+  });
+
+  test("offers paper mode and reports the choice", () => {
+    const onOcrAll = vi.fn();
+    show({ onOcrAll });
+    fireEvent.click(screen.getByRole("checkbox", { name: /paper mode/i }));
+    expect(onOcrAll).toHaveBeenCalledWith(true);
+  });
+
+  test("says how many pages the model will read in paper mode", () => {
+    show({ ocrAll: true, estimate: projection({ scanned: 2, native: 8, recognized: 10 }) });
+    expect(screen.getByText(/The model reads all 10/)).toBeTruthy();
   });
 
   test("says why it cannot start, and refuses to", () => {
@@ -78,6 +94,21 @@ describe("while it runs", () => {
   test("falls back to the projection before the first page lands", () => {
     show({ job: { stage: "Loading the model", done: 0, total: 0, elapsedMs: 60_000 } });
     expect(screen.getByText(/9 min left/)).toBeTruthy();
+  });
+
+  // The live readout: a long conversion shows what was just read, not only a bar.
+  test("shows the page the conversion just read", () => {
+    show({
+      job: { stage: "Recognizing pages", done: 3, total: 10, elapsedMs: 60_000 },
+      livePage: {
+        page: 7,
+        regions: [{ text: "Down the rabbit hole", label: "text", x: 0.1, y: 0.1, w: 0.8, h: 0.1 }],
+        blocks: [{ type: "text", text: "Down the rabbit hole", page: 7 }],
+      },
+    });
+    expect(screen.getByText(/Just read/)).toBeTruthy();
+    expect(screen.getByText("Down the rabbit hole")).toBeTruthy();
+    expect(screen.getByAltText("page 7")).toBeTruthy();
   });
 });
 

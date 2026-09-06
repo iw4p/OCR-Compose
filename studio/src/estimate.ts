@@ -10,11 +10,18 @@ export type Estimate = {
   scanned: number;
   native: number;
   blank: number;
-  /** null when scanned pages are selected but no page has been timed yet. */
+  /** Pages the model will recognize: scanned, plus native ones in paper mode. */
+  recognized: number;
+  /** null when pages need the model but no page has been timed yet. */
   totalMs: number | null;
 };
 
-export function estimate(pages: PageReport[], selected: Set<number>, ocrMsPerPage?: number): Estimate {
+export function estimate(
+  pages: PageReport[],
+  selected: Set<number>,
+  ocrMsPerPage?: number,
+  ocrAll = false,
+): Estimate {
   const counts = { scanned: 0, native: 0, blank: 0 };
   for (const page of pages) {
     if (!selected.has(page.page)) continue;
@@ -22,10 +29,13 @@ export function estimate(pages: PageReport[], selected: Set<number>, ocrMsPerPag
     else if (page.verdict === "native") counts.native += 1;
     else counts.blank += 1;
   }
-  const unknown = counts.scanned > 0 && ocrMsPerPage === undefined;
+  const recognized = counts.scanned + (ocrAll ? counts.native : 0);
+  const native = ocrAll ? 0 : counts.native;
+  const unknown = recognized > 0 && ocrMsPerPage === undefined;
   return {
     ...counts,
+    recognized,
     selected: selected.size,
-    totalMs: unknown ? null : STARTUP_MS + counts.native * NATIVE_MS_PER_PAGE + counts.scanned * (ocrMsPerPage ?? 0),
+    totalMs: unknown ? null : STARTUP_MS + native * NATIVE_MS_PER_PAGE + recognized * (ocrMsPerPage ?? 0),
   };
 }

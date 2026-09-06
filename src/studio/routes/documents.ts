@@ -57,7 +57,11 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
       const document = getDocument(parse(DocumentParams, request.params).id);
       const body = parse(ConvertBody, request.body);
       const pages = [...new Set(body.pages)].sort((a, b) => a - b);
-      const needsOcr = document.reports.some((report) => pages.includes(report.page) && report.verdict === "scanned");
+      const needsOcr = document.reports.some(
+        (report) =>
+          pages.includes(report.page) &&
+          (report.verdict === "scanned" || (body.ocrAll && report.verdict === "native")),
+      );
 
       send({ type: "stage", stage: needsOcr ? "Loading the model" : "Reading pages" });
       const options = {
@@ -65,8 +69,13 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
         ...(body.title && { title: body.title }),
         ...(body.author && { author: body.author }),
         language: body.language,
+        ...(body.ocrAll && { ocrAll: true }),
+        // each recognized page streams to the client before the count ticks,
+        // so the UI can show what was just read, not only that something was
+        onPage: (page: number, regions: unknown, blocks: unknown) =>
+          send({ type: "page", page, regions, blocks }),
         onProgress: (done: number, total: number) =>
-          send({ type: "progress", stage: "Recognizing scanned pages", done, total }),
+          send({ type: "progress", stage: body.ocrAll ? "Recognizing pages" : "Recognizing scanned pages", done, total }),
       };
       const result = needsOcr
         ? await withModel((engine) => pdfToBook(document.bytes, { ...options, ocr: engine }))
