@@ -16,8 +16,22 @@ read for real, and the convert step carrying the measured estimate](studio-full.
    during installation it streams the installer's own output; afterwards it
    shows what is actually on disk, whether weights are cached, whether the model
    is resident in memory, and the CPU and RAM it will run on.
+
+   On Apple Silicon the card also offers **fast mode**: one click installs
+   `mlx-vlm` (into our managed venv only — an operator's own environment gets
+   the command to run instead) and from then on the Studio starts an MLX
+   server alongside the engine and serves the VLM step on the machine's GPU,
+   stopping it when the engine unloads. PaddlePaddle has no Apple-GPU backend,
+   so this is the difference between ~104 s and ~13 s a page here. If the
+   server cannot come up, conversion falls back to the CPU rather than
+   failing. The state lives in one marker file, `.ocr-compose-models/fast-mode`
+   (see `src/models/fastmode.ts`).
 2. **File.** A dropped PDF is classified page by page — native text, scanned or
-   blank — and the whole book is shown as one map you select pages in.
+   blank — and the whole book is shown as one map you select pages in. An EPUB
+   or a `book.json` can be dropped too: it skips conversion and goes straight
+   to Review, so a book made earlier can come back for fixing. (A bare
+   `book.json` referencing images it cannot carry is refused with the way out
+   — upload the EPUB, which carries them.)
 3. **Test.** One page is recognized for real, cache bypassed. You see the
    regions the model found drawn over the page, the contract blocks they become,
    and the measured duration.
@@ -26,9 +40,21 @@ read for real, and the convert step carrying the measured estimate](studio-full.
    starts finishing pages, the remaining time is recomputed from its own rate
    rather than the projection. Then: EPUB or `book.json`.
 
-Editing is not part of the Studio. `book.json` is a readable file and the CLI
-validates and packs it; a block editor in the browser was more surface than the
-job needs.
+   **Paper mode** sends native-text pages through the model too. The native
+   path reads a page's text in raw stream order, which interleaves the columns
+   of a two-column layout; the model reads the page like a person instead, and
+   brings formulas (TeX → MathML) and tables (parsed rows) with it. It is the
+   right choice for academic papers and the wrong one for novels, which is why
+   it is a toggle and not a heuristic.
+
+5. **Review.** The finished book, scrollable, rendered from the contract —
+   dialect emphasis as emphasis, images, tables, TeX. Hovering a block offers
+   move, remove, and (for anything that carries one text) edit-as-dialect.
+   Every change goes through the same validation `pack` refuses on — a bad
+   edit is an error naming the block, never a corrupt EPUB — and re-packs
+   immediately, so the download links always serve what the card shows.
+   Heavier surgery still belongs in `book.json` itself; the card is for the
+   three things a conversion got wrong, not for authoring.
 
 ## Time estimates
 
@@ -36,9 +62,9 @@ Every estimate is measured on the machine it runs on — there is no table of
 assumed speeds. The test run times recognition alone (`fresh: true` bypasses the
 page cache, and the clock starts after the engine is warm, because loading
 weights is a one-time cost, not a per-page one). Native pages are charged a flat
-120 ms; scanned pages are charged the measured figure. Until a page has been
-timed, a selection containing scans reports no estimate at all rather than a
-made-up one.
+120 ms; scanned pages — and in paper mode every page — are charged the measured
+figure. Until a page has been timed, a selection needing the model reports no
+estimate at all rather than a made-up one.
 
 ## API
 
@@ -56,7 +82,10 @@ and `stream.ts` (the progress protocol).
 | `POST /api/documents` | raw PDF body in, page verdicts out |
 | `GET /api/documents/:id/pages/:page.png` | a rendered page |
 | `POST /api/documents/:id/test` | recognize one page, timed, uncached |
-| `POST /api/documents/:id/convert` | convert, streaming stage and page progress |
+| `POST /api/documents/:id/convert` | convert, streaming stages, per-page progress and each page's blocks |
+| `GET` \| `PUT /api/documents/:id/book` | the book for review; a validated edit that re-packs the EPUB |
+| `GET /api/documents/:id/assets/:file` | an image the conversion produced |
+| `POST /api/model/fast/enable` \| `/disable` | Apple-GPU fast mode, streaming the install |
 | `GET /api/documents/:id/epub` \| `/book.json` | the finished output |
 
 Every failure answers with the same shape, `{ "error": "..." }`, at the status it

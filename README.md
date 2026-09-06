@@ -64,14 +64,15 @@ corruption.
 
 Two fidelity rules keep the door open for hard problems without blocking on
 them: a table with parsed `rows` becomes a real `<table>`, one without becomes
-an image; a formula with `tex` becomes MathML (the TeX rides along losslessly
-inside it), one without becomes an image. When better recognizers land, output
-improves and no schema or back-end code changes.
+an image; a formula with `tex` becomes typeset MathML — real fractions and
+superscripts that reflow and scale with the reader's font, with the TeX riding
+along losslessly inside it — one without becomes an image. When better
+recognizers land, output improves and no schema or back-end code changes.
 
-Not built yet: math structure recognition and tables too irregular to parse
-(`colspan`/`rowspan`) — both degrade to images by design — TOC cross-checking
-for books whose chapter titles look like running heads, and figure extraction
-beyond embedded images on the native path.
+Not built yet: tables too irregular to parse (`colspan`/`rowspan`) — these
+degrade to images by design — TOC cross-checking for books whose chapter
+titles look like running heads, and figure extraction beyond embedded images
+on the native path.
 
 ## Using it
 
@@ -100,8 +101,15 @@ Open the printed local URL, then:
 3. Read one page for real. You see the recognized regions and the blocks they
    become, and the page's measured duration turns into a time estimate for the
    whole selection on *this* machine.
-4. Convert, watching real per-page progress, then download the EPUB or
-   `book.json`.
+4. Convert, watching each page appear as the model reads it. For academic
+   papers, switch on **paper mode**: the model reads every page — so
+   multi-column layouts come out in reading order, formulas become real math
+   (MathML, TeX kept inside), and tables become tables. The CLI equivalent is
+   `--ocr-all`.
+5. Review the finished book in place — scroll it, fix a block's text, move or
+   remove one; every change is validated and the EPUB re-packs — then
+   download the EPUB or `book.json`. Both can come back later: drop an EPUB
+   or a `book.json` on the Studio and it opens straight in Review.
 
 The app runs locally because model environments, model weights and source
 books should remain on the user's machine. Nothing is written outside
@@ -113,7 +121,7 @@ The CLI (via `npx tsx src/cli.ts …` or `npm run build` then
 
 | Command | Does |
 |---|---|
-| `ocr-compose pdf in.pdf book/ [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr]` | PDF → editable `book.json` + `assets/` |
+| `ocr-compose pdf in.pdf book/ [--title T] [--author A] [--lang L] [--pages 1,3-5] [--ocr] [--ocr-all]` | PDF → editable `book.json` + `assets/` |
 | `ocr-compose unpack in.epub book/` | EPUB → editable `book.json` + `assets/` |
 | `ocr-compose validate book/` | check a book folder, print issues with paths |
 | `ocr-compose pack book/ out.epub` | book folder → EPUB (refuses invalid input) |
@@ -138,8 +146,12 @@ export OCR_COMPOSE_PADDLEOCR_PYTHON="$PWD/.venv-paddleocr/bin/python"
 On Apple Silicon the official local route uses `cpu`; set
 `OCR_COMPOSE_PADDLEOCR_DEVICE=cpu`. GPU hosts can select a Paddle device such as
 `gpu:0`. Direct Apple CPU inference is very slow. Paddle's supported accelerated
-Apple path keeps layout analysis local and serves the VLM with MLX-VLM (the
-`mlx` extra):
+Apple path keeps layout analysis local and serves the VLM with MLX-VLM — in the
+Studio this is one click: the model card offers **fast mode** on Apple Silicon,
+installs the `mlx` extra if needed, and starts and stops the MLX server itself
+(measured here: about 8× the CPU rate; very rarely the fast path repeats a
+phrase, so the CPU path stays the reference). The commands below are the manual
+CLI equivalent:
 
 ```sh
 uv pip install --python .venv-paddleocr/bin/python -r tools/paddle/pyproject.toml --extra mlx
