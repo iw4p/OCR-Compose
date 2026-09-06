@@ -32,6 +32,30 @@ describe("ocrBlocksToBookBlocks", () => {
     ]);
   });
 
+  // PaddleOCR-VL wraps formula TeX in $$…$$ (or $…$, \[…\]); the contract's
+  // `tex` holds the body alone, or every formula would be unparseable.
+  test("strips the model's math delimiters from formula TeX", () => {
+    const at = { x: 0.1, y: 0.2, w: 0.8, h: 0.1 };
+    const formula = (text: string) => ocrBlocksToBookBlocks([{ text, label: "formula", ...at }], 3)[0];
+    expect(formula("$$ \\frac{a}{b} $$")).toEqual({ type: "formula", display: true, tex: "\\frac{a}{b}", page: 3 });
+    expect(formula("$x^2$")).toMatchObject({ tex: "x^2" });
+    expect(formula("\\[ x^2 \\]")).toMatchObject({ tex: "x^2" });
+    expect(formula("x^2")).toMatchObject({ tex: "x^2" });
+  });
+
+  // The model writes inline math as $…$ inside prose. Plausible TeX becomes
+  // dialect math (→ real MathML in the book); a dollar amount stays literal.
+  test("keeps the model's inline math as math, and money as money", () => {
+    const at = { x: 0.1, y: 0.2, w: 0.8, h: 0.1 };
+    const text = (t: string) => ocrBlocksToBookBlocks([{ text: t, label: "text", ...at }], 3)[0];
+    expect(text("temperature $ \\tau $ and rate $ \\lambda_{KD} $")).toMatchObject({
+      text: "temperature $\\tau$ and rate $\\lambda_{KD}$",
+    });
+    expect(text("marker $ ^{1} $ follows")).toMatchObject({ text: "marker $^{1}$ follows" });
+    expect(text("it costs $5 and $10 today")).toMatchObject({ text: "it costs \\$5 and \\$10 today" });
+    expect(text("a lone $ sign")).toMatchObject({ text: "a lone \\$ sign" });
+  });
+
   test("flattens internal newlines and keeps textless figure regions", () => {
     const output = ocrBlocksToBookBlocks(
       [
@@ -229,9 +253,12 @@ describe("tables", () => {
     });
   });
 
-  test("refuses spans rather than reshaping them, degrading to table-source", () => {
-    const block = rowsOf('<table><tr><td colspan="2">Wide</td></tr><tr><td>a</td><td>b</td></tr></table>');
-    expect(block).toMatchObject({ type: "text", role: "table-source" });
+  // The fidelity rule: a grid the flat `rows` cannot hold becomes an image of
+  // the region — a reader must never see raw <tr><td> soup.
+  test("refuses spans rather than reshaping them, degrading to an image crop", () => {
+    const source = '<table><tr><td colspan="2">Wide</td></tr><tr><td>a</td><td>b</td></tr></table>';
+    expect(rowsOf(source)).toMatchObject({ type: "image", file: expect.stringMatching(/^assets\/fig-2-/) });
+    expect(ocrFigures([{ text: source, label: "table", x: 0.1, y: 0.1, w: 0.8, h: 0.3 }])).toHaveLength(1);
   });
 
   test("still reads pipe-delimited Markdown tables", () => {
@@ -245,13 +272,18 @@ describe("tables", () => {
     });
   });
 
-  test("degrades unparseable table text instead of dropping it", () => {
-    expect(rowsOf("Kopplungskonstanten, columns unreadable")).toEqual({
-      type: "text",
-      role: "table-source",
-      text: "Kopplungskonstanten, columns unreadable",
-      page: 2,
-    });
+  test("degrades unparseable table text to an image instead of dropping it", () => {
+    expect(rowsOf("Kopplungskonstanten, columns unreadable")).toMatchObject({ type: "image", page: 2 });
+  });
+
+  // A table region too degenerate to crop (below the size sanity floor) keeps
+  // its source rather than vanishing.
+  test("a table too small to crop keeps its source text", () => {
+    const [block] = ocrBlocksToBookBlocks(
+      [{ text: "not a table", label: "table", x: 0.1, y: 0.1, w: 0.01, h: 0.01 }],
+      2
+    );
+    expect(block).toMatchObject({ type: "text", role: "table-source", text: "not a table" });
   });
 
   test("a table_title is a caption, not a table", () => {

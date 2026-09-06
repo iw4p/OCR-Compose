@@ -30,8 +30,51 @@ export interface OcrEngine {
 }
 
 const escapeDialect = (text: string) => text.replace(/[\\*$[\]^]/g, (char) => "\\" + char);
-const prose = (text: string) =>
-  escapeDialect(text.replace(/\r\n?/g, "\n").replace(/\s*\n+\s*/g, " ").replace(/\s+/g, " ").trim());
+
+/**
+ * PaddleOCR-VL wraps formula TeX in math delimiters — `$$…$$`, `$…$`,
+ * `\[…\]` or `\(…\)`. The contract's `tex` field holds the body alone, and a
+ * delimiter left in would make every formula unparseable downstream.
+ */
+const texBody = (raw: string) =>
+  /^(?:\$\$?|\\\[|\\\()([\s\S]*?)(?:\$\$?|\\\]|\\\))$/.exec(raw)?.[1]?.trim() ?? raw;
+const collapse = (text: string) =>
+  text.replace(/\r\n?/g, "\n").replace(/\s*\n+\s*/g, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * Whether a `$…$` span the model wrote is plausibly TeX rather than money:
+ * TeX syntax characters, or a short symbol run (`$k$`, `$\tau$`). A body
+ * ending in an odd run of backslashes would swallow the closing `$` when the
+ * dialect re-parses it, so it stays literal.
+ */
+const isTexSpan = (body: string): boolean => {
+  if (body === "" || ((/\\+$/.exec(body)?.[0].length ?? 0) % 2 === 1)) return false;
+  return /[\\^_{}]/.test(body) || body.length <= 3;
+};
+
+/**
+ * Model text → dialect prose. Everything is escaped literal — except `$…$`
+ * spans that look like TeX, which become dialect inline math and render as
+ * real MathML instead of `$ \tau $` appearing verbatim in the book.
+ */
+const prose = (text: string): string => {
+  const flat = collapse(text);
+  let out = "";
+  let from = 0;
+  for (let open = flat.indexOf("$"); open !== -1; open = flat.indexOf("$", from)) {
+    const close = flat.indexOf("$", open + 1);
+    const body = close === -1 ? null : flat.slice(open + 1, close).trim();
+    if (body !== null && isTexSpan(body)) {
+      out += escapeDialect(flat.slice(from, open)) + "$" + body + "$";
+      from = close + 1;
+    } else {
+      // not math: emit the escaped `$` alone, so a later real span still counts
+      out += escapeDialect(flat.slice(from, open + 1));
+      from = open + 1;
+    }
+  }
+  return out + escapeDialect(flat.slice(from));
+};
 
 const markdownTable = (text: string): string[][] | null => {
   const lines = text
@@ -106,18 +149,31 @@ const furnitureRole = (label: string): DemotedRole =>
 const finite = (block: OcrBlock) => Number.isFinite(block.x + block.y + block.w + block.h);
 
 /**
- * The figure regions of a page: a vision label with no recognized text (a
- * chart the provider did read stays text rather than losing it), plausibly
- * content-sized, and not the page itself. `pdfToBook` crops these out of the
- * page render and writes them under the names `ocrImageFile` derives, so the
- * mapper below stays a pure function of the OCR blocks.
+ * A table region the flat `rows` grid cannot hold — merged cells, ragged
+ * source, or text that is not a table at all. The fidelity rule (§ README)
+ * degrades these to an image of the region, never to raw source in the book.
+ */
+const unparseableTable = (block: OcrBlock): boolean => {
+  const label = block.label.toLowerCase();
+  if (!/table/.test(label) || CAPTION.test(label)) return false;
+  const raw = block.text.trim();
+  return raw !== "" && tableRows(raw) === null;
+};
+
+/**
+ * The regions of a page `pdfToBook` crops out of the page render, written
+ * under the names `ocrImageFile` derives so the mapper below stays a pure
+ * function of the OCR blocks: vision labels with no recognized text (a chart
+ * the provider did read stays text rather than losing it), and tables the
+ * grid cannot hold. All plausibly content-sized, and never the page itself.
  */
 export function ocrFigures(blocks: OcrBlock[]): OcrBlock[] {
   return blocks.filter((block) => {
+    if (!finite(block) || block.w < 0.02 || block.h < 0.02 || block.w * block.h >= 0.9) return false;
+    if (unparseableTable(block)) return true;
     const label = block.label.toLowerCase();
     if (FURNITURE.test(label) || CAPTION.test(label) || !VISION.test(label)) return false;
-    if (block.text.trim() !== "") return false;
-    return finite(block) && block.w >= 0.02 && block.h >= 0.02 && block.w * block.h < 0.9;
+    return block.text.trim() === "";
   });
 }
 
@@ -169,10 +225,13 @@ export function ocrBlocksToBookBlocks(blocks: OcrBlock[], page: number): Block[]
     if (!raw) continue;
 
     if (/formula|equation/.test(label)) {
-      emit({ type: "formula", display: true, tex: raw, page }, block);
+      emit({ type: "formula", display: true, tex: texBody(raw), page }, block);
       continue;
     }
     if (/table/.test(label) && !CAPTION.test(label)) {
+      // An unparseable table was already emitted as a figure crop above; one
+      // that also failed the crop's size sanity keeps its source, demote-style,
+      // rather than vanishing.
       const rows = tableRows(raw);
       emit(
         rows ? { type: "table", rows, page } : { type: "text", role: "table-source", text: prose(raw), page },
