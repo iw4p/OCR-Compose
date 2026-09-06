@@ -15,6 +15,8 @@ export type Hardware = { cpu: string; cores: number; memoryBytes: number; platfo
 export type Doc = {
   id: string;
   name: string;
+  /** `pdf` converts; `book` (an uploaded EPUB or book.json) reviews and packs. */
+  kind: "pdf" | "book";
   sizeBytes: number;
   pageCount: number;
   pages: PageReport[];

@@ -5,7 +5,7 @@ import { withModel } from "../../models/registry.js";
 import { renderPagePng } from "../../pdf/extract.js";
 import { ocrBlocksToBookBlocks } from "../../pdf/ocr.js";
 import { OCR_SCALE, pdfToBook } from "../../pdf/pdf.js";
-import { addDocument, downloadName, getDocument, requirePage } from "../documents.js";
+import { addDocument, downloadName, getDocument, requirePage, requirePdf } from "../documents.js";
 import { badRequest, notFound } from "../errors.js";
 import { AssetParams, BookBody, ConvertBody, DocumentParams, PageParams, PageQuery, TestBody, parse } from "../schemas.js";
 import { stream } from "../stream.js";
@@ -19,11 +19,18 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
       /[/\\]/g,
       "-",
     );
-    return addDocument(name, new Uint8Array(request.body as Buffer)).summary;
+    // Most uploads arrive as raw bytes via the catch-all parser; a book.json
+    // sent as application/json arrives already parsed by Fastify's own JSON
+    // parser, so it is put back into bytes for the one sniffing entry point.
+    const body: unknown = request.body;
+    const bytes = Buffer.isBuffer(body)
+      ? new Uint8Array(body)
+      : new TextEncoder().encode(typeof body === "string" ? body : JSON.stringify(body));
+    return (await addDocument(name, bytes)).summary;
   });
 
   app.get("/api/documents/:id/pages/:page.png", { schema: { params: PageParams, querystring: PageQuery } }, async (request, reply) => {
-    const document = getDocument(request.params.id);
+    const document = requirePdf(getDocument(request.params.id));
     const page = requirePage(document, request.params.page);
     return reply.type("image/png").send(renderPagePng(document.bytes, page, request.query.scale));
   });
@@ -35,7 +42,7 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
    * conversion then reuses this page's cached result instead of redoing it.
    */
   app.post("/api/documents/:id/test", { schema: { params: DocumentParams, body: TestBody } }, async (request) => {
-    const document = getDocument(request.params.id);
+    const document = requirePdf(getDocument(request.params.id));
     const page = requirePage(document, request.body.page);
     const png = renderPagePng(document.bytes, page, OCR_SCALE);
     let started = performance.now();
@@ -55,7 +62,7 @@ export const documentRoutes: FastifyPluginAsyncZod = async (app) => {
   // inside the stream where a rejection can reach the client. See schemas.parse.
   app.post("/api/documents/:id/convert", async (request, reply) =>
     stream(reply, async (send) => {
-      const document = getDocument(parse(DocumentParams, request.params).id);
+      const document = requirePdf(getDocument(parse(DocumentParams, request.params).id));
       const body = parse(ConvertBody, request.body);
       const pages = [...new Set(body.pages)].sort((a, b) => a - b);
       const needsOcr = document.reports.some(

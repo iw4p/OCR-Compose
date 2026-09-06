@@ -10,6 +10,7 @@ import { Dropzone } from "./components/Dropzone";
 import { FileCard } from "./components/FileCard";
 import { TestCard } from "./components/TestCard";
 import { BookCard } from "./components/BookCard";
+import { BookFileCard } from "./components/BookFileCard";
 import { ConvertCard, type Job, type Meta } from "./components/ConvertCard";
 
 export default function App() {
@@ -60,6 +61,8 @@ export default function App() {
       setSelected(pagesWithContent(added.pages));
       setMeta({ title: added.title, author: added.author, language: "en" });
       setTestPage(added.suggestedPage);
+      // an uploaded EPUB or book.json is already a book — straight to review
+      if (added.kind === "book") setBook(await api.getBook(added.id));
     } catch (e) {
       fail(e);
     } finally {
@@ -157,12 +160,16 @@ export default function App() {
         />
 
         {doc ? (
-          <FileCard doc={doc} selected={selected} onSelected={setSelected} onReset={forgetDocument} />
+          doc.kind === "pdf" ? (
+            <FileCard doc={doc} selected={selected} onSelected={setSelected} onReset={forgetDocument} />
+          ) : (
+            <BookFileCard doc={doc} book={book} onReset={forgetDocument} />
+          )
         ) : (
           <Dropzone onFile={(file) => void addFile(file)} busy={reading} />
         )}
 
-        {doc && projection && needsModel && (
+        {doc && doc.kind === "pdf" && projection && needsModel && (
           <TestCard
             doc={doc}
             page={testPage}
@@ -175,7 +182,7 @@ export default function App() {
           />
         )}
 
-        {doc && projection && (
+        {doc && doc.kind === "pdf" && projection && (
           <ConvertCard
             doc={doc}
             meta={meta}

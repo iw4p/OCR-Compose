@@ -234,6 +234,78 @@ describe("convert", () => {
     expect(after.book.content[0]!.text).not.toContain("unclosed");
   });
 
+  test("a converted EPUB can come back later: upload, review, edit, download", async () => {
+    const { id } = await upload();
+    await events(await convert(id, { pages: [1, 2, 3], title: "F", language: "en" }));
+    const epub = new Uint8Array(await (await fetch(`${base}/api/documents/${id}/epub`)).arrayBuffer());
+
+    const back = await fetch(`${base}/api/documents`, {
+      method: "POST",
+      headers: { "x-ocr-compose-filename": "F.epub", "content-type": "application/epub+zip" },
+      body: epub,
+    });
+    expect(back.status).toBe(200);
+    const summary = (await back.json()) as { id: string; kind: string; title: string };
+    expect(summary.kind).toBe("book");
+    expect(summary.title).toBe("F");
+
+    // straight to review — and the downloads are live without any conversion
+    const { book } = (await (await fetch(`${base}/api/documents/${summary.id}/book`)).json()) as {
+      book: { content: unknown[] };
+    };
+    expect(book.content.length).toBeGreaterThan(0);
+    expect((await fetch(`${base}/api/documents/${summary.id}/epub`)).status).toBe(200);
+  });
+
+  test("a bare book.json uploads, packs, and refuses page routes politely", async () => {
+    const plain = {
+      title: "Notizen",
+      language: "de",
+      content: [
+        { type: "heading", level: 1, text: "Kapitel 1" },
+        { type: "text", text: "Ein Absatz mit *Nachdruck*." },
+      ],
+      footnotes: {},
+    };
+    const response = await fetch(`${base}/api/documents`, {
+      method: "POST",
+      headers: { "x-ocr-compose-filename": "notizen.json", "content-type": "application/json" },
+      body: JSON.stringify(plain),
+    });
+    expect(response.status).toBe(200);
+    const summary = (await response.json()) as { id: string; kind: string; title: string };
+    expect(summary.kind).toBe("book");
+    expect(summary.title).toBe("Notizen");
+
+    const epub = await fetch(`${base}/api/documents/${summary.id}/epub`);
+    expect(epub.headers.get("content-type")).toBe("application/epub+zip");
+    expect(epub.headers.get("content-disposition")).toContain("notizen.epub");
+
+    const delivered = await events(await convert(summary.id, { pages: [1], language: "en" }));
+    expect(delivered).toEqual([{ type: "error", message: expect.stringContaining("a book, not a PDF") }]);
+  });
+
+  test("a book.json that references images it cannot carry is refused with the way out", async () => {
+    const { feldtheorie } = await import("../fixtures.js");
+    const response = await fetch(`${base}/api/documents`, {
+      method: "POST",
+      headers: { "x-ocr-compose-filename": "feldtheorie.json", "content-type": "application/json" },
+      body: JSON.stringify(feldtheorie),
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toContain("upload the EPUB instead");
+  });
+
+  test("an invalid book.json is refused naming the first problem", async () => {
+    const response = await fetch(`${base}/api/documents`, {
+      method: "POST",
+      headers: { "x-ocr-compose-filename": "broken.json", "content-type": "application/json" },
+      body: JSON.stringify({ title: "No content", language: "en" }),
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toContain("not a valid book.json");
+  });
+
   test("an unknown asset is a 404, and asset names cannot carry paths", async () => {
     const { id } = await upload();
     expect((await fetch(`${base}/api/documents/${id}/assets/nope.png`)).status).toBe(404);
