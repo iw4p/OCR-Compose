@@ -35,6 +35,18 @@ const upload = async (name = "frankenstein.pdf") => {
   };
 };
 
+/** The smallest PDF mupdf accepts: one page, one line of text. */
+const TINY_PDF = new TextEncoder().encode(`%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>endobj
+4 0 obj<</Length 90>>stream
+BT /F1 12 Tf 72 720 Td (One page is plenty for a test about how many documents are kept.) Tj ET
+endstream
+endobj
+5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+trailer<</Root 1 0 R>>`);
+
 /** Collects a job stream into the list of events it delivered. */
 const events = async (response: Response): Promise<Record<string, unknown>[]> => {
   expect(response.ok).toBe(true);
@@ -118,11 +130,20 @@ describe("documents", () => {
     expect(((await response.json()) as { error: string }).error).toContain("no longer loaded");
   });
 
-  // Four full uploads of a 200-page PDF, each classified page by page — the
-  // one test that legitimately outgrows the default timeout on a slow CI box.
-  test("only the most recent documents are kept in memory", { timeout: 30_000 }, async () => {
-    const first = await upload("first.pdf");
-    for (let i = 0; i < 3; i++) await upload(`later-${i}.pdf`);
+  // Eviction cares how many documents there are, not what is in them — a
+  // one-page PDF keeps this instant where four full books blew CI's clock.
+  test("only the most recent documents are kept in memory", async () => {
+    const uploadTiny = async (name: string) => {
+      const response = await fetch(`${base}/api/documents`, {
+        method: "POST",
+        headers: { "x-ocr-compose-filename": name, "content-type": "application/pdf" },
+        body: TINY_PDF,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as { id: string };
+    };
+    const first = await uploadTiny("first.pdf");
+    for (let i = 0; i < 3; i++) await uploadTiny(`later-${i}.pdf`);
     expect((await fetch(`${base}/api/documents/${first.id}/epub`)).status).toBe(404);
   });
 });
