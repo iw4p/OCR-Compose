@@ -16,12 +16,19 @@ npm install
 npm run studio
 ```
 
+Or the same thing with git:
+
+```sh
+git clone https://github.com/iw4p/OCR-Compose.git
+cd OCR-Compose
+npm install
+npm run studio
+```
+
 Your browser opens the Studio by itself. Everything after that is clicks: the
 model installs from a button (it needs [Python 3](https://www.python.org/downloads/)
 on the machine, and says so if it is missing), Apple Silicon Macs get one-click
 fast mode, and the finished book is reviewed and downloaded in the same page.
-
-(`git clone https://github.com/iw4p/OCR-Compose.git` works too, of course.)
 
 Drop a PDF, read one page to see the quality and learn how fast your machine
 is, then convert and download the EPUB. Everything — the model, the weights,
