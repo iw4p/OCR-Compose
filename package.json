@@ -1,7 +1,7 @@
 {
   "name": "ocr-compose",
   "version": "0.1.0",
-  "description": "Turn a scanned or native PDF into a real, reflowable EPUB — local OCR, no uploads.",
+  "description": "Make a real EPUB from a PDF — including scanned ones. Local Studio, paper mode for academic papers, typeset math.",
   "keywords": [
     "ocr",
     "pdf",
@@ -34,7 +34,8 @@
     "build": "tsc -p .",
     "studio": "npm run studio:build --silent && tsx src/cli.ts studio",
     "studio:dev": "concurrently -k -n api,web -c blue,green \"tsx src/cli.ts studio\" \"vite --config studio/vite.config.ts\"",
-    "studio:build": "vite build --config studio/vite.config.ts"
+    "studio:build": "vite build --config studio/vite.config.ts",
+    "prepack": "npm run build && npm run studio:build"
   },
   "dependencies": {
     "@fastify/static": "^10.1.3",
@@ -61,5 +62,13 @@
     "typescript": "^7.0.2",
     "vite": "8.2.2",
     "vitest": "^4.1.11"
-  }
+  },
+  "files": [
+    "dist",
+    "studio/dist",
+    "tools/paddle",
+    "tools/ocr-paddle.py",
+    "docs/DESIGN.md",
+    "docs/STUDIO.md"
+  ]
 }

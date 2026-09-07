@@ -6,12 +6,22 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg)](package.json)
 
+You need [Node 22+](https://nodejs.org) — the LTS installer works the same on
+macOS, Windows and Linux. Then, no git required:
+[download the ZIP](https://github.com/iw4p/OCR-Compose/archive/refs/heads/main.zip),
+unzip it, open a terminal in that folder, and:
+
 ```sh
-git clone https://github.com/iw4p/OCR-Compose.git
-cd OCR-Compose
 npm install
-npm run studio          # then open the printed local URL
+npm run studio
 ```
+
+Your browser opens the Studio by itself. Everything after that is clicks: the
+model installs from a button (it needs [Python 3](https://www.python.org/downloads/)
+on the machine, and says so if it is missing), Apple Silicon Macs get one-click
+fast mode, and the finished book is reviewed and downloaded in the same page.
+
+(`git clone https://github.com/iw4p/OCR-Compose.git` works too, of course.)
 
 Drop a PDF, read one page to see the quality and learn how fast your machine
 is, then convert and download the EPUB. Everything — the model, the weights,

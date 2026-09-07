@@ -155,7 +155,19 @@ export async function disableFast(): Promise<string> {
 export async function installModel(onLog: (line: string) => void = () => {}): Promise<string> {
   if (await findPython()) return "PaddleOCR-VL is already installed.";
   const base = process.env.OCR_COMPOSE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
-  const version = (await run(base, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"])).trim();
+  const version = (
+    await run(base, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"]).catch((error: unknown) => {
+      // "spawn python3 ENOENT" helps nobody — say what to install, and where
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" || /ENOENT/.test(String(error)))
+        throw new Error(
+          `Python 3 was not found on this machine ("${base}"). The model runs in Python: ` +
+            "install it from https://www.python.org/downloads/ (any version 3.9-3.13), " +
+            "then come back and click install again. If Python lives somewhere unusual, " +
+            "set OCR_COMPOSE_PYTHON to its path.",
+        );
+      throw error;
+    })
+  ).trim();
   const [major] = version.split(/\s+/).map(Number);
   if (major !== 3) throw new Error(`${base} is not Python 3. Set OCR_COMPOSE_PYTHON to one that is.`);
   onLog(`Creating a Python environment with ${base}…`);

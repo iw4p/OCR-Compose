@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // CLI: every operation is exposed as a function (JSON in/out per DESIGN.md §7
 // so non-TS ecosystems can shell out) with a thin argv wrapper below.
+import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,6 +53,21 @@ export async function pdfToBookDir(
   await writeBookDir(bookDir, book, assets);
   return { warnings, counts: report.counts };
 }
+
+/**
+ * Best-effort, cross-platform browser open. The printed URL stays the source
+ * of truth; a URL in a terminal is a hurdle for most people, so the browser
+ * opens itself — silently not at all when the platform refuses.
+ */
+const openBrowser = (url: string): void => {
+  const [command, args]: [string, string[]] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  spawn(command, args, { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+};
 
 /** Parse `1,3,8-10` into sorted, unique 1-based PDF page numbers. */
 export function parsePageSpec(spec: string): number[] {
@@ -154,10 +171,11 @@ async function main(argv: string[]): Promise<number> {
         const portFlag = args.indexOf("--port");
         const port = portFlag === -1 ? 4173 : Number(args[portFlag + 1]);
         if (!Number.isInteger(port) || port < 0 || port > 65535)
-          throw new Error("usage: ocr-compose studio [--port 4173]");
+          throw new Error("usage: ocr-compose studio [--port 4173] [--no-open]");
         const { startStudio } = await import("./studio/server.js");
         const studio = await startStudio({ port });
         console.log(`OCR Compose Studio: ${studio.url}`);
+        if (!args.includes("--no-open") && process.stdout.isTTY) openBrowser(studio.url);
         await new Promise<void>((resolve) => {
           const stop = () => void studio.app.close().then(resolve);
           process.once("SIGINT", stop);
@@ -175,6 +193,16 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Through an npm bin, argv[1] is a symlink into node_modules/.bin while
+// import.meta.url is the real file — resolve it, or `npx ocr-compose` runs
+// nothing and exits 0 as if everything were fine.
+const invokedAs = (() => {
+  try {
+    return process.argv[1] ? pathToFileURL(realpathSync(process.argv[1])).href : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+if (invokedAs === import.meta.url) {
   process.exitCode = await main(process.argv.slice(2));
 }

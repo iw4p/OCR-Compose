@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { MODEL_ID, managedModelDir, modelStatus, removeModel, unloadModel, withModel } from "./registry.js";
+import { MODEL_ID, installModel, managedModelDir, modelStatus, removeModel, unloadModel, withModel } from "./registry.js";
 
 const idle = (ms: number) => (process.env.OCR_COMPOSE_MODEL_IDLE_MS = String(ms));
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,6 +91,18 @@ describe("warm model cache", () => {
     finish();
     await inFlight;
     expect(await unloadModel()).toBe("PaddleOCR-VL is not loaded.");
+  });
+});
+
+describe("installing without Python", () => {
+  test("a machine with no Python gets directions, not a spawn error", async () => {
+    delete process.env.OCR_COMPOSE_PADDLEOCR_PYTHON;
+    process.env.OCR_COMPOSE_PYTHON = join(root, "no", "such", "python");
+    try {
+      await expect(installModel()).rejects.toThrow(/python\.org/);
+    } finally {
+      delete process.env.OCR_COMPOSE_PYTHON;
+    }
   });
 });
 
