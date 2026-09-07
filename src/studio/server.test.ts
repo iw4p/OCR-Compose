@@ -118,7 +118,9 @@ describe("documents", () => {
     expect(((await response.json()) as { error: string }).error).toContain("no longer loaded");
   });
 
-  test("only the most recent documents are kept in memory", async () => {
+  // Four full uploads of a 200-page PDF, each classified page by page — the
+  // one test that legitimately outgrows the default timeout on a slow CI box.
+  test("only the most recent documents are kept in memory", { timeout: 30_000 }, async () => {
     const first = await upload("first.pdf");
     for (let i = 0; i < 3; i++) await upload(`later-${i}.pdf`);
     expect((await fetch(`${base}/api/documents/${first.id}/epub`)).status).toBe(404);
