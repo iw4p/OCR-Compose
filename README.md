@@ -17,6 +17,14 @@ Drop a PDF, read one page to see the quality and learn how fast your machine
 is, then convert and download the EPUB. Everything — the model, the weights,
 the book — stays on your machine; nothing is ever uploaded.
 
+![The Studio converting three pages of a two-column arXiv paper in paper mode:
+the pages are classified, the model reads each page live — its regions drawn
+over the page beside the blocks they become — and the finished book opens for
+review and editing](docs/studio-live.gif)
+
+*Three pages of a two-column arXiv paper, live: drop, paper mode, watch each
+page being read, then review the book and download the EPUB.*
+
 ![The Studio reading one scanned page of Alice's Adventures in Wonderland: the
 regions the model found drawn over the page, the blocks they become, and the
 measured cost per page](docs/studio.png)
